@@ -9,6 +9,7 @@ import io.github.payal1762005.minisql.storage.CsvTableStorage;
 import io.github.payal1762005.minisql.storage.RowCursor;
 import io.github.payal1762005.minisql.storage.TableStorage;
 import io.github.payal1762005.minisql.model.TableSchema;
+import io.github.payal1762005.minisql.operators.AggregationExecutionConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -56,6 +57,97 @@ class DefaultQueryEngineTest {
         assertEquals(List.of("last_name", "department"), columnNames(result.rows().get(0)));
         assertEquals(new Row(Map.of("last_name", "Record001", "department", "OrbitOps")),
                 result.rows().get(0));
+    }
+
+    @Test
+    void executesOrderByAscendingDescendingAndMultipleKeysEndToEnd() throws Exception {
+        DefaultQueryEngine localEngine = orderingEngine(List.of(
+                orderingRow("1", "Zoe", "Sales", "10"),
+                orderingRow("2", "Amy", "Sales", "30"),
+                orderingRow("3", "Bo", "Engineering", "30"),
+                orderingRow("4", "Cal", "Engineering", "5")));
+
+        assertEquals(List.of("Cal", "Zoe", "Amy", "Bo"),
+                values(localEngine.execute("SELECT name FROM employees ORDER BY salary ASC"), "name"));
+        assertEquals(List.of("Amy", "Bo", "Zoe", "Cal"),
+                values(localEngine.execute("SELECT name FROM employees ORDER BY salary DESC"), "name"));
+        assertEquals(List.of("Cal", "Bo", "Zoe", "Amy"),
+                values(localEngine.execute(
+                        "SELECT name FROM employees ORDER BY department ASC, salary ASC"), "name"));
+    }
+
+    @Test
+    void executesOrderByWithLimitAndLimitWithoutOrderByEndToEnd() throws Exception {
+        DefaultQueryEngine localEngine = orderingEngine(List.of(
+                orderingRow("1", "Zoe", "Sales", "10"),
+                orderingRow("2", "Amy", "Sales", "30"),
+                orderingRow("3", "Bo", "Engineering", "30")));
+
+        assertEquals(List.of("Amy", "Bo"),
+                values(localEngine.execute("SELECT name FROM employees ORDER BY salary DESC LIMIT 2"), "name"));
+        assertEquals(List.of("Zoe", "Amy"),
+                values(localEngine.execute("SELECT name FROM employees LIMIT 2"), "name"));
+        assertEquals(List.of(), localEngine.execute("SELECT name FROM employees LIMIT 0").rows());
+    }
+
+    @Test
+    void executesWhereOrderByLimitAndEmptyResultQueriesEndToEnd() throws Exception {
+        DefaultQueryEngine localEngine = orderingEngine(List.of(
+                orderingRow("1", "Zoe", "Sales", "10"),
+                orderingRow("2", "Amy", "Sales", "30"),
+                orderingRow("3", "Bo", "Engineering", "30")));
+
+        assertEquals(List.of("Amy"),
+                values(localEngine.execute(
+                        "SELECT name FROM employees WHERE department = 'Sales' "
+                                + "ORDER BY salary DESC LIMIT 1"), "name"));
+        assertEquals(List.of(), localEngine.execute(
+                "SELECT name FROM employees WHERE salary > 100 ORDER BY salary LIMIT 2").rows());
+    }
+
+    @Test
+    void executesGroupedAggregateSortAndLimitWithSerialAndParallelAggregation() throws Exception {
+        DefaultQueryEngine serial = orderingEngine(List.of(
+                orderingRow("1", "Zoe", "Sales", "10"),
+                orderingRow("2", "Amy", "Sales", "30"),
+                orderingRow("3", "Bo", "Engineering", "30"),
+                orderingRow("4", "Cal", "Engineering", "5")), AggregationExecutionConfig.serial());
+        DefaultQueryEngine parallel = orderingEngine(List.of(
+                orderingRow("1", "Zoe", "Sales", "10"),
+                orderingRow("2", "Amy", "Sales", "30"),
+                orderingRow("3", "Bo", "Engineering", "30"),
+                orderingRow("4", "Cal", "Engineering", "5")),
+                AggregationExecutionConfig.parallel(2, 1));
+        String sql = "SELECT department, SUM(salary) AS payroll FROM employees "
+                + "GROUP BY department ORDER BY payroll DESC LIMIT 1";
+
+        List<Row> serialResult = serial.execute(sql).rows();
+        assertEquals(List.of(row("department", "Sales", "payroll", "40")), serialResult);
+        assertEquals(serialResult, parallel.execute(sql).rows());
+    }
+
+    @Test
+    void sortsNullsLastAndPreservesLegacyQueriesWithoutOrderingOrLimit() throws Exception {
+        DefaultQueryEngine localEngine = orderingEngine(List.of(
+                orderingRowNullable("1", "Missing", "Sales", null),
+                orderingRow("2", "Low", "Sales", "2"),
+                orderingRow("3", "High", "Sales", "10")));
+
+        assertEquals(List.of("Low", "High", "Missing"),
+                values(localEngine.execute("SELECT name FROM employees ORDER BY salary ASC"), "name"));
+        assertEquals(List.of("Employee001", "Employee002", "Employee003", "Employee004",
+                        "Employee005", "Employee006", "Employee007", "Employee008",
+                        "Employee009", "Employee010", "Employee011", "Employee012"),
+                values(engine.execute("SELECT first_name FROM employees"), "first_name"));
+    }
+
+    @Test
+    void rejectsInvalidOrderByColumnDuringPlanning() {
+        SqlExecutionException exception = assertThrows(SqlExecutionException.class,
+                () -> engine.execute("SELECT first_name FROM employees ORDER BY missing_column"));
+
+        assertTrue(exception.getMessage().contains("ORDER BY"));
+        assertTrue(exception.getMessage().contains("missing_column"));
     }
 
     @Test
@@ -244,6 +336,26 @@ class DefaultQueryEngineTest {
     }
 
     @Test
+    void explainMatchesTheSortAndLimitPlanUsedForExecution() throws Exception {
+        DefaultQueryEngine localEngine = orderingEngine(List.of(
+                orderingRow("1", "Zoe", "Sales", "10"),
+                orderingRow("2", "Amy", "Sales", "30")));
+        String sql = "SELECT name FROM employees ORDER BY salary DESC LIMIT 1";
+
+        LogicalPlanNode plan = localEngine.explain(sql);
+        QueryResult explainResult = localEngine.execute("EXPLAIN " + sql);
+
+        assertEquals("Limit", plan.operator());
+        assertEquals("Projection", plan.children().get(0).operator());
+        assertEquals("Sort", plan.children().get(0).children().get(0).operator());
+        assertEquals(plan.format(), explainResult.rows().stream()
+                .map(row -> row.values().get("QUERY PLAN"))
+                .reduce((left, right) -> left + "\n" + right)
+                .orElseThrow());
+        assertEquals(List.of(row("name", "Amy")), localEngine.execute(sql).rows());
+    }
+
+    @Test
     void wrapsRuntimeExecutionFailuresAndRetainsCause() throws IOException {
         Path table = dataDirectory.resolve("numeric.csv");
         Files.writeString(table, "amount\nnot-a-number\n");
@@ -280,6 +392,59 @@ class DefaultQueryEngineTest {
             throws IOException {
         List<Row> rows = List.of(row("id", invalidNumber ? "not-a-number" : "1"));
         return new DefaultQueryEngine(trackingStorage(closed, rows, closed));
+    }
+
+    private DefaultQueryEngine orderingEngine(List<Row> rows) {
+        return orderingEngine(rows, AggregationExecutionConfig.serial());
+    }
+
+    private DefaultQueryEngine orderingEngine(
+            List<Row> rows, AggregationExecutionConfig aggregationConfig) {
+        TableStorage storage = new TableStorage() {
+            @Override
+            public TableSchema getSchema(String tableName) {
+                return new TableSchema(tableName, List.of("id", "name", "department", "salary"));
+            }
+
+            @Override
+            public java.util.stream.Stream<Row> scan(String tableName) {
+                return rows.stream();
+            }
+
+            @Override
+            public RowCursor openScan(String tableName) {
+                var iterator = rows.iterator();
+                return new RowCursor() {
+                    @Override
+                    public boolean hasNext() {
+                        return iterator.hasNext();
+                    }
+
+                    @Override
+                    public Row next() {
+                        return iterator.next();
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                };
+            }
+        };
+        return new DefaultQueryEngine(storage, aggregationConfig);
+    }
+
+    private Row orderingRow(String id, String name, String department, String salary) {
+        return orderingRowNullable(id, name, department, salary);
+    }
+
+    private Row orderingRowNullable(String id, String name, String department, String salary) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("id", id);
+        values.put("name", name);
+        values.put("department", department);
+        values.put("salary", salary);
+        return new Row(values);
     }
 
     private TableStorage trackingStorage(AtomicBoolean scanOpened) {
