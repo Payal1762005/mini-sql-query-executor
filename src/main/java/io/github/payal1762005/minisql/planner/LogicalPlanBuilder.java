@@ -16,10 +16,12 @@ import io.github.payal1762005.minisql.model.TableSchema;
 import io.github.payal1762005.minisql.model.WhereExpression;
 import io.github.payal1762005.minisql.operators.AggregateOperator;
 import io.github.payal1762005.minisql.operators.AggregateSpecification;
+import io.github.payal1762005.minisql.operators.AggregationExecutionConfig;
 import io.github.payal1762005.minisql.operators.ComparisonOperator;
 import io.github.payal1762005.minisql.operators.ComparisonPredicate;
 import io.github.payal1762005.minisql.operators.FilterOperator;
 import io.github.payal1762005.minisql.operators.Operator;
+import io.github.payal1762005.minisql.operators.AggregationOperatorFactory;
 import io.github.payal1762005.minisql.operators.ProjectionOperator;
 import io.github.payal1762005.minisql.operators.ScanOperator;
 import io.github.payal1762005.minisql.storage.ScanPredicate;
@@ -42,9 +44,17 @@ import java.util.function.Predicate;
  */
 public final class LogicalPlanBuilder {
     private final TableStorage storage;
+    private final AggregationExecutionConfig aggregationConfig;
 
     public LogicalPlanBuilder(TableStorage storage) {
+        this(storage, AggregationExecutionConfig.serial());
+    }
+
+    public LogicalPlanBuilder(
+            TableStorage storage, AggregationExecutionConfig aggregationConfig) {
         this.storage = Objects.requireNonNull(storage, "Table storage must not be null");
+        this.aggregationConfig = Objects.requireNonNull(
+                aggregationConfig, "Aggregation execution configuration must not be null");
     }
 
     public Operator build(SelectQuery query) throws SqlExecutionException {
@@ -106,8 +116,15 @@ public final class LogicalPlanBuilder {
             String grouping = query.groupByColumns().isEmpty()
                     ? "global"
                     : String.join(", ", query.groupByColumns());
-            node = new LogicalPlanNode("Aggregate",
-                    "functions=[" + functions + "], GROUP BY [" + grouping + "]", List.of(node));
+            String aggregateDetails = "functions=[" + functions + "], GROUP BY [" + grouping + "]";
+            if (aggregationConfig.parallelEnabled()) {
+                aggregateDetails += ", workers=" + aggregationConfig.workerCount()
+                        + ", batchSize=" + aggregationConfig.batchSize()
+                        + ", maxInFlightBatches=" + aggregationConfig.workerCount();
+            }
+            node = new LogicalPlanNode(
+                    aggregationConfig.parallelEnabled() ? "ParallelAggregate" : "Aggregate",
+                    aggregateDetails, List.of(node));
         }
 
         List<String> selected = new ArrayList<>();
@@ -158,8 +175,10 @@ public final class LogicalPlanBuilder {
                 }
             }
 
-            operator = new AggregateOperator(
-                    operator, query.groupByColumns(), specifications);
+            operator = aggregationConfig.parallelEnabled()
+                    ? AggregationOperatorFactory.parallel(
+                    operator, query.groupByColumns(), specifications, aggregationConfig)
+                    : new AggregateOperator(operator, query.groupByColumns(), specifications);
             return new ProjectionOperator(operator, projectionSources, projectionOutputs);
         }
 

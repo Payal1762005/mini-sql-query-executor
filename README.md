@@ -25,6 +25,8 @@ GitHub profile: <https://github.com/Payal1762005>
 - Supports grouping and `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`.
 - Provides `EXPLAIN` plans without opening a row scan.
 - Pushes required-column selection and eligible comparisons into the CSV scan.
+- Keeps serial aggregation as the default, with opt-in bounded parallel
+  aggregation for aggregate queries.
 - Provides an interactive CLI with formatted output and `help`, `tables`, and
   `exit` commands.
 - Includes an opt-in JMH benchmark profile for repeatable performance
@@ -211,6 +213,30 @@ The logical plan has this shape:
 Projection: first_name
   Scan: table=employees, columns=[first_name, salary], pushed=[salary > 90000]
 ```
+
+Aggregation is serial by default. Applications can opt in to parallel
+aggregation with the public engine configuration; worker count also bounds
+in-flight batches, while batch size controls the number of input rows processed
+by each worker task:
+
+```java
+var config = AggregationExecutionConfig.parallel(4, 1024);
+var engine = new DefaultQueryEngine(new CsvTableStorage(), config);
+var result = engine.execute(
+        "SELECT department, AVG(salary) FROM employees GROUP BY department");
+```
+
+Use the existing constructor to retain serial aggregation:
+
+```java
+var engine = new DefaultQueryEngine(new CsvTableStorage());
+```
+
+`EXPLAIN` identifies the selected aggregate operator. In parallel mode it
+includes the worker count, batch size, and in-flight batch limit. Parallel
+aggregation still reads the child scan sequentially; only batch aggregation is
+parallelized. It is an opt-in execution strategy, not a guaranteed performance
+improvement.
 
 ## Architecture
 
