@@ -8,6 +8,8 @@ import io.github.payal1762005.minisql.model.ComparisonExpression;
 import io.github.payal1762005.minisql.model.LiteralValue;
 import io.github.payal1762005.minisql.model.LogicalExpression;
 import io.github.payal1762005.minisql.model.LogicalOperator;
+import io.github.payal1762005.minisql.model.OrderByItem;
+import io.github.payal1762005.minisql.model.OrderDirection;
 import io.github.payal1762005.minisql.model.SelectQuery;
 import io.github.payal1762005.minisql.model.WhereExpression;
 import io.github.payal1762005.minisql.operators.AggregateFunction;
@@ -162,6 +164,93 @@ class SqlParserImplTest {
         SelectQuery query = parse("SELECT department, role FROM staff GROUP BY department, role");
 
         assertEquals(List.of("department", "role"), query.groupByColumns());
+    }
+
+    @Test
+    void parsesOrderByAscendingByDefaultAndExplicitDirections() throws SqlParseException {
+        SelectQuery defaultAscending = parse("SELECT name FROM employees ORDER BY name");
+        SelectQuery explicitAscending = parse("SELECT name FROM employees ORDER BY name ASC");
+        SelectQuery descending = parse("SELECT name FROM employees ORDER BY salary DESC");
+
+        assertEquals(List.of(new OrderByItem("name", OrderDirection.ASC)),
+                defaultAscending.orderByItems());
+        assertEquals(defaultAscending.orderByItems(), explicitAscending.orderByItems());
+        assertEquals(List.of(new OrderByItem("salary", OrderDirection.DESC)),
+                descending.orderByItems());
+    }
+
+    @Test
+    void parsesMultipleOrderKeysWithWhereAndGroupBy() throws SqlParseException {
+        SelectQuery query = parse("SELECT department, AVG(salary) AS avg_salary FROM employees "
+                + "WHERE salary > 10 GROUP BY department "
+                + "ORDER BY department ASC, avg_salary DESC");
+
+        assertTrue(query.where().isPresent());
+        assertEquals(List.of("department"), query.groupByColumns());
+        assertEquals(List.of(new OrderByItem("department", OrderDirection.ASC),
+                new OrderByItem("avg_salary", OrderDirection.DESC)), query.orderByItems());
+    }
+
+    @Test
+    void parsesLimitAloneCombinedWithOrderAndZero() throws SqlParseException {
+        SelectQuery limited = parse("SELECT name FROM employees LIMIT 10;");
+        SelectQuery orderedLimited = parse(
+                "SELECT name FROM employees ORDER BY salary DESC LIMIT 5;");
+        SelectQuery zero = parse("SELECT name FROM employees LIMIT 0");
+
+        assertEquals(java.util.Optional.of(10), limited.limit());
+        assertEquals(List.of(), limited.orderByItems());
+        assertEquals(java.util.Optional.of(5), orderedLimited.limit());
+        assertEquals(List.of(new OrderByItem("salary", OrderDirection.DESC)),
+                orderedLimited.orderByItems());
+        assertEquals(java.util.Optional.of(0), zero.limit());
+    }
+
+    @Test
+    void parsesNewKeywordsCaseInsensitivelyAndAllowsThemAsIdentifiers() throws SqlParseException {
+        SelectQuery query = parse(
+                "sElEcT ORDER, Asc, DESC, LIMIT fRoM LIMIT oRdEr bY ASC dEsC lImIt 1");
+
+        assertEquals(List.of(new ColumnReference("ORDER"), new ColumnReference("Asc"),
+                new ColumnReference("DESC"), new ColumnReference("LIMIT")), query.selectItems());
+        assertEquals("LIMIT", query.tableName());
+        assertEquals(List.of(new OrderByItem("ASC", OrderDirection.DESC)), query.orderByItems());
+        assertEquals(java.util.Optional.of(1), query.limit());
+    }
+
+    @Test
+    void rejectsMalformedOrderByClauses() {
+        assertParseError("SELECT name FROM employees ORDER BY",
+                "Expected a column name after ORDER BY", "line 1, column 36");
+        assertParseError("SELECT name FROM employees ORDER BY name,",
+                "Expected a column name after ORDER BY", "line 1, column 42");
+        assertParseError("SELECT name FROM employees ORDER BY name SIDEWAYS",
+                "Invalid ORDER BY direction 'SIDEWAYS'; expected ASC or DESC",
+                "line 1, column 42");
+        assertParseError("SELECT name FROM employees ORDER BY name ASC DESC",
+                "Unexpected token after the query", "line 1, column 46");
+        assertParseError("SELECT name FROM employees GROUP BY name ORDER BY name WHERE name = 'x'",
+                "Unexpected token after the query", "line 1, column 56");
+    }
+
+    @Test
+    void rejectsInvalidLimitValuesWithClearErrors() {
+        assertParseError("SELECT name FROM employees LIMIT",
+                "Expected a non-negative integer after LIMIT", "line 1, column 33");
+        assertParseError("SELECT name FROM employees LIMIT 1.5",
+                "LIMIT must be an integer", "line 1, column 34");
+        assertParseError("SELECT name FROM employees LIMIT -1",
+                "LIMIT must be non-negative", "line 1, column 35");
+        assertParseError("SELECT name FROM employees LIMIT 2147483648",
+                "LIMIT exceeds the maximum supported value", "line 1, column 34");
+    }
+
+    @Test
+    void rejectsLimitThenOrderAndUnexpectedTrailingTokens() {
+        assertParseError("SELECT name FROM employees LIMIT 2 ORDER BY name",
+                "Unexpected token after the query", "line 1, column 36");
+        assertParseError("SELECT name FROM employees ORDER BY name LIMIT 2 extra",
+                "Unexpected token after the query", "line 1, column 50");
     }
 
     @Test

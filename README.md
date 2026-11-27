@@ -19,10 +19,12 @@ GitHub profile: <https://github.com/Payal1762005>
 
 - Parses a supported `SELECT` subset into an immutable AST.
 - Reads CSV tables from a configurable directory using Apache Commons CSV.
-- Executes through closeable, pull-based scan, filter, projection, and aggregate
-  operators.
+- Executes through closeable, pull-based scan, filter, projection, sort, limit,
+  and aggregate operators.
 - Supports simple column-to-literal WHERE comparisons and boolean expressions.
 - Supports grouping and `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`.
+- Supports `ORDER BY` with multiple columns and `ASC`/`DESC`, plus non-negative
+  integer `LIMIT`.
 - Provides `EXPLAIN` plans without opening a row scan.
 - Pushes required-column selection and eligible comparisons into the CSV scan.
 - Keeps serial aggregation as the default, with opt-in bounded parallel
@@ -157,6 +159,34 @@ SELECT first_name AS employee_name, salary AS annual_salary
 FROM employees;
 ```
 
+`ORDER BY` supports multiple columns. The direction defaults to `ASC`; `DESC`
+sorts descending. A sort key can be a source column even when it is not in the
+SELECT list, or an output alias:
+
+```sql
+SELECT first_name, department
+FROM employees
+ORDER BY department, salary DESC;
+
+SELECT first_name AS employee_name, salary AS annual_salary
+FROM employees
+ORDER BY annual_salary DESC
+LIMIT 3;
+```
+
+Non-aggregate sort columns use numeric `BigDecimal` comparison when every
+non-null value in that column is numeric; otherwise the whole column is sorted
+lexicographically. Null values sort last in both directions. Sorting is stable,
+so rows with equal sort keys keep their input order. `LIMIT` accepts a
+non-negative integer, including zero, and runs after sorting when both clauses
+are present. A limit without `ORDER BY` returns up to that many rows in scan
+order.
+
+Sorting materializes all rows entering the sort operator in memory before it
+can return the first result. Large sorts therefore require memory proportional
+to the input row count; `LIMIT` after `ORDER BY` does not avoid that
+materialization.
+
 WHERE supports `=`, `!=`, `<>`, `>`, `<`, `>=`, and `<=` with single-quoted
 string, unsigned integer, or unsigned decimal literals. SQL string literals
 escape an apostrophe by doubling it:
@@ -200,18 +230,23 @@ table scan:
 EXPLAIN
 SELECT first_name
 FROM employees
-WHERE salary > 90000;
+WHERE salary > 90000
+ORDER BY salary DESC
+LIMIT 5;
 ```
 
-For this query, the plan includes a projection and a scan whose details show
-the requested columns and pushed predicate. The plan is informational; it does
-not report measured costs.
+For this query, the plan includes `Limit`, `Projection`, `Sort`, and `Scan`
+nodes; scan details show the requested columns and pushed predicate. The plan
+is informational; it does not report measured costs.
 
 The logical plan has this shape:
 
 ```text
-Projection: first_name
-  Scan: table=employees, columns=[first_name, salary], pushed=[salary > 90000]
+Limit: rows=5
+  Projection: first_name
+    Sort: salary DESC
+      Projection: first_name, salary AS __sort_key_0
+        Scan: table=employees, columns=[first_name, salary], pushed=[salary > 90000]
 ```
 
 Aggregation is serial by default. Applications can opt in to parallel
@@ -273,8 +308,10 @@ flowchart TD
     S --> O[Scan operator]
     O --> F[Residual FilterOperator, when needed]
     F --> G[AggregateOperator, when requested]
-    G --> R[ProjectionOperator]
-    R --> Q[QueryResult: materialized output rows]
+    G --> P[ProjectionOperator]
+    P --> S[SortOperator, when ORDER BY is present]
+    S --> L[LimitOperator, when LIMIT is present]
+    L --> Q[QueryResult: materialized output rows]
     Q --> T[ASCII table formatter]
 ```
 
@@ -282,12 +319,16 @@ The operator pipeline follows pull semantics: the consumer asks the outer
 operator whether it has another row, then requests that row. The request travels
 through parent operators toward storage, which advances a CSV cursor only as
 needed. Each matching input record is returned as a row and passed through the
-remaining operators. Exhaustion, explicit close, or failures close the child
-resources. Grouped and global aggregation are an exception to strictly
-row-at-a-time output: on its first output request, `AggregateOperator` consumes
-its input and retains per-group aggregate state before producing result rows.
-The engine then collects all output rows because the current `QueryResult` API
-is materialized.
+remaining operators. `ORDER BY` adds an internal projection for sort keys,
+stably materializes and sorts its child, then a final projection removes
+internal keys. `LIMIT` is applied outside sorting and closes the child as soon
+as its row count is reached. Exhaustion, explicit close, or failures close the
+child resources. Grouped and global aggregation are an exception to strictly
+row-at-a-time output: on its first output request, the aggregate operator
+consumes its input and retains per-group aggregate state before producing rows.
+Sorting also materializes its complete input before producing results. The
+engine collects all output rows because the current `QueryResult` API is
+materialized.
 
 ## Optimization details
 
@@ -409,8 +450,7 @@ read are not reduced by predicate pushdown.
 Current limitations:
 
 - SQL support is intentionally restricted to the documented SELECT subset;
-  there are no joins, subqueries, ORDER BY, LIMIT, or additional statement
-  types.
+  there are no joins, subqueries, or additional statement types.
 - Table names, source columns, and aliases use exact, case-sensitive matching.
   SQL keywords are case-insensitive. Aliases require `AS`, are output labels,
   and are not resolved in WHERE or GROUP BY.
@@ -421,6 +461,9 @@ Current limitations:
   lexicographic; numeric comparisons use `BigDecimal`.
 - A selected non-aggregate column in an aggregate query must also be listed in
   `GROUP BY`; `SELECT *` cannot be combined with aggregates.
+- Aggregate-query sort keys must be selected outputs (including aliases) or
+  `GROUP BY` columns. Sorting is in-memory and requires all rows entering the
+  sort to be materialized before the first result is returned.
 - `COUNT(column)` counts non-null values without requiring numeric data.
   `SUM`, `AVG`, `MIN`, and `MAX` require numeric input values. `AVG` uses four
   decimal places with HALF_UP rounding.
