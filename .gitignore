@@ -1,0 +1,64 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+.kotlin
+
+# Generated benchmark output and temporary local data
+/benchmark-*.csv
+/*-benchmark-results.csv
+/benchmark-data/
+/tmp-data/
+*.tmp.csv
+*.tmp
+*.log
+
+# Java build artifacts
+*.class
+
+# Local environment files
+.env
+.env.*
+!.env.example
+/secrets/
+/credentials/
+*.pem
+*.p12
+*.pfx
+*.key
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### Other IDEs and editors ###
+.vscode/
+.fleet/
+.settings/
+.classpath
+.project
+.factorypath
+
+### Eclipse ###
+.apt_generated
+.springBeans
+.sts4-cache
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### Mac OS ###
+.DS_Store
+
+### Windows ###
+Thumbs.db
+Desktop.ini

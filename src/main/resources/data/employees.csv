@@ -1,0 +1,13 @@
+employee_id,first_name,last_name,department,job_title,salary,hire_date
+Employee001,Employee001,Record001,OrbitOps,Signal Gardener,101200,2024-01-01
+Employee002,Employee002,Record002,OrbitOps,Pattern Cartographer,128400,2024-01-02
+Employee003,Employee003,Record003,NebulaLab,Orbit Mapper,93450,2024-01-03
+Employee004,Employee004,Record004,QuantumDesk,Pixel Steward,106750,2024-01-04
+Employee005,Employee005,Record005,PixelForge,Color Wrangler,88400,2024-01-05
+Employee006,Employee006,Record006,OrbitOps,Data Alchemist,119300,2024-01-06
+Employee007,Employee007,Record007,NebulaLab,Signal Architect,157600,2024-01-07
+Employee008,Employee008,Record008,PixelForge,Pattern Weaver,82750,2024-01-08
+Employee009,Employee009,Record009,QuantumDesk,Number Gardener,103250,2024-01-09
+Employee010,Employee010,Record010,OrbitOps,Orbit Coordinator,168900,2024-01-10
+Employee011,Employee011,Record011,PixelForge,Palette Engineer,91600,2024-01-11
+Employee012,Employee012,Record012,QuantumDesk,Query Wrangler,79500,2024-01-12
