@@ -1,0 +1,1758 @@
+﻿diff --git a/src/main/java/io/github/payal1762005/minisql/operators/AbstractNumericAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/AbstractNumericAggregateState.java
+new file mode 100644
+index 0000000..5f58cc4
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/AbstractNumericAggregateState.java
+@@ -0,0 +1,68 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++import java.math.BigDecimal;
++import java.util.Objects;
++
++abstract class AbstractNumericAggregateState implements AggregateState {
++    private final String column;
++    protected long count;
++
++    AbstractNumericAggregateState(String column) {
++        this.column = Objects.requireNonNull(column, "Aggregate input column must not be null");
++    }
++
++    @Override
++    public final void add(Row row) {
++        Objects.requireNonNull(row, "Child operator returned a null row");
++        if (!row.values().containsKey(column)) {
++            throw new IllegalArgumentException(
++                    "Aggregate input column '" + column + "' is missing from row");
++        }
++        String value = row.values().get(column);
++        if (value == null) {
++            return;
++        }
++        addValue(parseNumber(value));
++        count++;
++    }
++
++    @Override
++    public final void merge(AggregateState other) {
++        if (other == null || getClass() != other.getClass()) {
++            throw incompatibleState();
++        }
++        AbstractNumericAggregateState state = (AbstractNumericAggregateState) other;
++        if (!column.equals(state.column)) {
++            throw incompatibleState();
++        }
++        mergeValues(state);
++        count += state.count;
++    }
++
++    protected abstract void addValue(BigDecimal value);
++
++    protected abstract void mergeValues(AbstractNumericAggregateState other);
++
++    protected final String column() {
++        return column;
++    }
++
++    protected final boolean isEmpty() {
++        return count == 0;
++    }
++
++    private BigDecimal parseNumber(String value) {
++        try {
++            return new BigDecimal(value);
++        } catch (NumberFormatException exception) {
++            throw new IllegalArgumentException("Invalid numeric value '" + value
++                    + "' in aggregate input column '" + column + "'", exception);
++        }
++    }
++
++    private IllegalArgumentException incompatibleState() {
++        return new IllegalArgumentException("Cannot merge incompatible aggregate states");
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/AggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/AggregateState.java
+new file mode 100644
+index 0000000..6f9fb5c
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/AggregateState.java
+@@ -0,0 +1,15 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++/**
++ * Mutable state for one aggregate expression, designed to be merged with a
++ * compatible state produced from another set of rows.
++ */
++interface AggregateState {
++    void add(Row row);
++
++    void merge(AggregateState other);
++
++    String result();
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/AggregateStateFactory.java b/src/main/java/io/github/payal1762005/minisql/operators/AggregateStateFactory.java
+new file mode 100644
+index 0000000..5925bcf
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/AggregateStateFactory.java
+@@ -0,0 +1,21 @@
++package io.github.payal1762005.minisql.operators;
++
++import java.util.Objects;
++
++final class AggregateStateFactory {
++    private AggregateStateFactory() {
++    }
++
++    static AggregateState create(AggregateSpecification specification) {
++        Objects.requireNonNull(specification, "Aggregate specification must not be null");
++        return switch (specification.function()) {
++            case COUNT -> "*".equals(specification.inputColumn())
++                    ? new CountStarAggregateState()
++                    : new CountColumnAggregateState(specification.inputColumn());
++            case SUM -> new SumAggregateState(specification.inputColumn());
++            case AVG -> new AvgAggregateState(specification.inputColumn());
++            case MIN -> new MinAggregateState(specification.inputColumn());
++            case MAX -> new MaxAggregateState(specification.inputColumn());
++        };
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/AvgAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/AvgAggregateState.java
+new file mode 100644
+index 0000000..b2b80aa
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/AvgAggregateState.java
+@@ -0,0 +1,28 @@
++package io.github.payal1762005.minisql.operators;
++
++import java.math.BigDecimal;
++
++final class AvgAggregateState extends AbstractNumericAggregateState {
++    private BigDecimal total = BigDecimal.ZERO;
++
++    AvgAggregateState(String column) {
++        super(column);
++    }
++
++    @Override
++    protected void addValue(BigDecimal value) {
++        total = total.add(value);
++    }
++
++    @Override
++    protected void mergeValues(AbstractNumericAggregateState other) {
++        total = total.add(((AvgAggregateState) other).total);
++    }
++
++    @Override
++    public String result() {
++        return isEmpty() ? null
++                : total.divide(BigDecimal.valueOf(count),
++                AggregateOperator.AVG_SCALE, AggregateOperator.AVG_ROUNDING_MODE).toPlainString();
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/CountColumnAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/CountColumnAggregateState.java
+new file mode 100644
+index 0000000..a531605
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/CountColumnAggregateState.java
+@@ -0,0 +1,44 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++import java.util.Objects;
++
++final class CountColumnAggregateState implements AggregateState {
++    private final String column;
++    private long count;
++
++    CountColumnAggregateState(String column) {
++        this.column = Objects.requireNonNull(column, "Aggregate input column must not be null");
++    }
++
++    @Override
++    public void add(Row row) {
++        Objects.requireNonNull(row, "Child operator returned a null row");
++        if (!row.values().containsKey(column)) {
++            throw new IllegalArgumentException(
++                    "Aggregate input column '" + column + "' is missing from row");
++        }
++        if (row.values().get(column) != null) {
++            count++;
++        }
++    }
++
++    @Override
++    public void merge(AggregateState other) {
++        if (!(other instanceof CountColumnAggregateState state)
++                || !column.equals(state.column)) {
++            throw incompatibleState();
++        }
++        count += state.count;
++    }
++
++    @Override
++    public String result() {
++        return Long.toString(count);
++    }
++
++    private IllegalArgumentException incompatibleState() {
++        return new IllegalArgumentException("Cannot merge incompatible aggregate states");
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/CountStarAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/CountStarAggregateState.java
+new file mode 100644
+index 0000000..5dd92c2
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/CountStarAggregateState.java
+@@ -0,0 +1,32 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++import java.util.Objects;
++
++final class CountStarAggregateState implements AggregateState {
++    private long count;
++
++    @Override
++    public void add(Row row) {
++        Objects.requireNonNull(row, "Child operator returned a null row");
++        count++;
++    }
++
++    @Override
++    public void merge(AggregateState other) {
++        if (!(other instanceof CountStarAggregateState state)) {
++            throw incompatibleState();
++        }
++        count += state.count;
++    }
++
++    @Override
++    public String result() {
++        return Long.toString(count);
++    }
++
++    private IllegalArgumentException incompatibleState() {
++        return new IllegalArgumentException("Cannot merge incompatible aggregate states");
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/GroupAccumulator.java b/src/main/java/io/github/payal1762005/minisql/operators/GroupAccumulator.java
+new file mode 100644
+index 0000000..511c60e
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/GroupAccumulator.java
+@@ -0,0 +1,142 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import java.util.Set;
++
++/**
++ * Holds the aggregate states for one immutable group key.
++ */
++final class GroupAccumulator {
++    private final List<String> groupByColumns;
++    private final List<String> key;
++    private final List<AggregateSpecification> specifications;
++    private final List<AggregateState> states;
++
++    GroupAccumulator(
++            List<String> groupByColumns,
++            List<String> key,
++            List<AggregateSpecification> specifications) {
++        this.groupByColumns = validateGroupByColumns(groupByColumns);
++        this.key = immutableNullableList(key, "Group key must not be null");
++        if (this.key.size() != this.groupByColumns.size()) {
++            throw new IllegalArgumentException("Group key size must match GROUP BY columns");
++        }
++        this.specifications = validateSpecifications(specifications, this.groupByColumns);
++        this.states = this.specifications.stream()
++                .map(AggregateStateFactory::create)
++                .toList();
++    }
++
++    List<String> key() {
++        return key;
++    }
++
++    List<AggregateSpecification> specifications() {
++        return specifications;
++    }
++
++    List<String> groupByColumns() {
++        return groupByColumns;
++    }
++
++    void add(Row row) {
++        Objects.requireNonNull(row, "Input row must not be null");
++        for (int index = 0; index < groupByColumns.size(); index++) {
++            String column = groupByColumns.get(index);
++            if (!row.values().containsKey(column)) {
++                throw new IllegalArgumentException(
++                        "Group-by column '" + column + "' is missing from row");
++            }
++            if (!Objects.equals(key.get(index), row.values().get(column))) {
++                throw new IllegalArgumentException("Input row does not match group key");
++            }
++        }
++        for (AggregateState state : states) {
++            state.add(row);
++        }
++    }
++
++    void merge(GroupAccumulator other) {
++        Objects.requireNonNull(other, "Group accumulator must not be null");
++        if (!key.equals(other.key)
++                || !groupByColumns.equals(other.groupByColumns)
++                || !specifications.equals(other.specifications)) {
++            throw new IllegalArgumentException(
++                    "Cannot merge group accumulators with incompatible keys or specifications");
++        }
++        for (int index = 0; index < states.size(); index++) {
++            states.get(index).merge(other.states.get(index));
++        }
++    }
++
++    GroupAccumulator copy() {
++        GroupAccumulator copy = new GroupAccumulator(groupByColumns, key, specifications);
++        copy.merge(this);
++        return copy;
++    }
++
++    Row result() {
++        Map<String, String> values = new LinkedHashMap<>();
++        for (int index = 0; index < groupByColumns.size(); index++) {
++            values.put(groupByColumns.get(index), key.get(index));
++        }
++        for (int index = 0; index < specifications.size(); index++) {
++            values.put(specifications.get(index).outputColumn(), states.get(index).result());
++        }
++        return new Row(values);
++    }
++
++    static void validateConfiguration(
++            List<String> groupByColumns, List<AggregateSpecification> specifications) {
++        List<String> groups = validateGroupByColumns(groupByColumns);
++        validateSpecifications(specifications, groups);
++    }
++
++    private static List<String> validateGroupByColumns(List<String> columns) {
++        Objects.requireNonNull(columns, "Group-by columns must not be null");
++        List<String> copy = new ArrayList<>(columns.size());
++        Set<String> seen = new HashSet<>();
++        for (String column : columns) {
++            if (column == null || column.isBlank()) {
++                throw new IllegalArgumentException("Group-by column must not be blank");
++            }
++            if (!seen.add(column)) {
++                throw new IllegalArgumentException("Duplicate group-by column: " + column);
++            }
++            copy.add(column);
++        }
++        return List.copyOf(copy);
++    }
++
++    private static List<AggregateSpecification> validateSpecifications(
++            List<AggregateSpecification> specifications, List<String> groupByColumns) {
++        Objects.requireNonNull(specifications, "Aggregate specifications must not be null");
++        if (specifications.isEmpty()) {
++            throw new IllegalArgumentException("At least one aggregate specification is required");
++        }
++        Set<String> outputNames = new HashSet<>(groupByColumns);
++        List<AggregateSpecification> copy = new ArrayList<>(specifications.size());
++        for (AggregateSpecification specification : specifications) {
++            Objects.requireNonNull(specification, "Aggregate specification must not be null");
++            if (!outputNames.add(specification.outputColumn())) {
++                throw new IllegalArgumentException("Duplicate aggregate output column: "
++                        + specification.outputColumn());
++            }
++            copy.add(specification);
++        }
++        return List.copyOf(copy);
++    }
++
++    private static List<String> immutableNullableList(List<String> values, String nullMessage) {
++        Objects.requireNonNull(values, nullMessage);
++        return Collections.unmodifiableList(new ArrayList<>(values));
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/MaxAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/MaxAggregateState.java
+new file mode 100644
+index 0000000..ec71ac2
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/MaxAggregateState.java
+@@ -0,0 +1,31 @@
++package io.github.payal1762005.minisql.operators;
++
++import java.math.BigDecimal;
++
++final class MaxAggregateState extends AbstractNumericAggregateState {
++    private BigDecimal maximum;
++
++    MaxAggregateState(String column) {
++        super(column);
++    }
++
++    @Override
++    protected void addValue(BigDecimal value) {
++        if (maximum == null || value.compareTo(maximum) > 0) {
++            maximum = value;
++        }
++    }
++
++    @Override
++    protected void mergeValues(AbstractNumericAggregateState other) {
++        BigDecimal otherMaximum = ((MaxAggregateState) other).maximum;
++        if (otherMaximum != null && (maximum == null || otherMaximum.compareTo(maximum) > 0)) {
++            maximum = otherMaximum;
++        }
++    }
++
++    @Override
++    public String result() {
++        return maximum == null ? null : maximum.stripTrailingZeros().toPlainString();
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/MinAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/MinAggregateState.java
+new file mode 100644
+index 0000000..da49029
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/MinAggregateState.java
+@@ -0,0 +1,31 @@
++package io.github.payal1762005.minisql.operators;
++
++import java.math.BigDecimal;
++
++final class MinAggregateState extends AbstractNumericAggregateState {
++    private BigDecimal minimum;
++
++    MinAggregateState(String column) {
++        super(column);
++    }
++
++    @Override
++    protected void addValue(BigDecimal value) {
++        if (minimum == null || value.compareTo(minimum) < 0) {
++            minimum = value;
++        }
++    }
++
++    @Override
++    protected void mergeValues(AbstractNumericAggregateState other) {
++        BigDecimal otherMinimum = ((MinAggregateState) other).minimum;
++        if (otherMinimum != null && (minimum == null || otherMinimum.compareTo(minimum) < 0)) {
++            minimum = otherMinimum;
++        }
++    }
++
++    @Override
++    public String result() {
++        return minimum == null ? null : minimum.stripTrailingZeros().toPlainString();
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/ParallelAggregateOperator.java b/src/main/java/io/github/payal1762005/minisql/operators/ParallelAggregateOperator.java
+new file mode 100644
+index 0000000..96870d5
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/ParallelAggregateOperator.java
+@@ -0,0 +1,253 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Deque;
++import java.util.Iterator;
++import java.util.List;
++import java.util.NoSuchElementException;
++import java.util.Objects;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++
++/**
++ * Single-consumer parallel hash aggregation. The calling thread alone pulls
++ * the child; workers aggregate bounded batches without accessing the operator.
++ */
++final class ParallelAggregateOperator implements Operator {
++    private final Operator child;
++    private final List<String> groupByColumns;
++    private final List<AggregateSpecification> specifications;
++    private final int batchSize;
++    private final int maxInFlightBatches;
++    private final ExecutorService executor;
++    private final boolean ownsExecutor;
++    private final Deque<Future<PartialAggregation>> pending = new ArrayDeque<>();
++
++    private Iterator<Row> results = List.<Row>of().iterator();
++    private boolean aggregated;
++    private boolean childClosed;
++    private boolean closed;
++    private PartialAggregation merged;
++
++    ParallelAggregateOperator(
++            Operator child,
++            List<String> groupByColumns,
++            List<AggregateSpecification> specifications,
++            int batchSize,
++            int maxInFlightBatches) {
++        this(child, groupByColumns, specifications, batchSize, maxInFlightBatches,
++                createOwnedExecutor(child, groupByColumns, specifications,
++                        batchSize, maxInFlightBatches), true);
++    }
++
++    ParallelAggregateOperator(
++            Operator child,
++            List<String> groupByColumns,
++            List<AggregateSpecification> specifications,
++            int batchSize,
++            int maxInFlightBatches,
++            ExecutorService executor) {
++        this(child, groupByColumns, specifications, batchSize, maxInFlightBatches,
++                executor, false);
++    }
++
++    ParallelAggregateOperator(
++            Operator child,
++            List<String> groupByColumns,
++            List<AggregateSpecification> specifications,
++            int batchSize,
++            int maxInFlightBatches,
++            ExecutorService executor,
++            boolean ownsExecutor) {
++        this.child = Objects.requireNonNull(child, "child operator must not be null");
++        this.groupByColumns = List.copyOf(
++                Objects.requireNonNull(groupByColumns, "Group-by columns must not be null"));
++        this.specifications = List.copyOf(
++                Objects.requireNonNull(specifications, "Aggregate specifications must not be null"));
++        GroupAccumulator.validateConfiguration(this.groupByColumns, this.specifications);
++        if (batchSize <= 0) {
++            throw new IllegalArgumentException("Batch size must be greater than zero");
++        }
++        if (maxInFlightBatches <= 0) {
++            throw new IllegalArgumentException("Maximum in-flight batches must be greater than zero");
++        }
++        this.batchSize = batchSize;
++        this.maxInFlightBatches = maxInFlightBatches;
++        this.executor = Objects.requireNonNull(executor, "Executor must not be null");
++        this.ownsExecutor = ownsExecutor;
++    }
++
++    @Override
++    public boolean hasNext() {
++        if (closed) {
++            return false;
++        }
++        try {
++            aggregateIfNeeded();
++            if (results.hasNext()) {
++                return true;
++            }
++            close();
++            return false;
++        } catch (RuntimeException | Error failure) {
++            closeAfterFailure(failure);
++            throw failure;
++        }
++    }
++
++    @Override
++    public Row next() {
++        if (!hasNext()) {
++            throw new NoSuchElementException("No aggregate result rows remain");
++        }
++        return results.next();
++    }
++
++    @Override
++    public void close() {
++        if (closed) {
++            return;
++        }
++        closed = true;
++        results = List.<Row>of().iterator();
++        pending.forEach(future -> future.cancel(true));
++        pending.clear();
++        Throwable failure = null;
++        try {
++            closeChild();
++        } catch (RuntimeException | Error closeFailure) {
++            failure = closeFailure;
++        }
++        if (ownsExecutor) {
++            try {
++                executor.shutdownNow();
++            } catch (RuntimeException | Error shutdownFailure) {
++                if (failure == null) {
++                    failure = shutdownFailure;
++                } else {
++                    failure.addSuppressed(shutdownFailure);
++                }
++            }
++        }
++        if (failure instanceof RuntimeException runtimeException) {
++            throw runtimeException;
++        }
++        if (failure instanceof Error error) {
++            throw error;
++        }
++    }
++
++    private void aggregateIfNeeded() {
++        if (aggregated) {
++            return;
++        }
++
++        try {
++            merged = new PartialAggregation(groupByColumns, specifications);
++            produceBatches();
++            closeChild();
++            while (!pending.isEmpty()) {
++                mergeNextBatch();
++            }
++            results = merged.resultRows().iterator();
++            aggregated = true;
++            merged = null;
++            shutdownOwnedExecutor();
++        } catch (RuntimeException | Error failure) {
++            closeAfterFailure(failure);
++            throw failure;
++        }
++    }
++
++    private void produceBatches() {
++        boolean exhausted = false;
++        while (!exhausted) {
++            List<Row> batch = new ArrayList<>(batchSize);
++            while (batch.size() < batchSize) {
++                if (!child.hasNext()) {
++                    exhausted = true;
++                    break;
++                }
++                batch.add(Objects.requireNonNull(
++                        child.next(), "Child operator returned a null row"));
++            }
++            if (!batch.isEmpty()) {
++                List<Row> immutableBatch = List.copyOf(batch);
++                pending.addLast(executor.submit(() ->
++                        new PartialAggregation(immutableBatch, groupByColumns, specifications)));
++            }
++            if (pending.size() >= maxInFlightBatches) {
++                mergeNextBatch();
++            }
++        }
++    }
++
++    private void mergeNextBatch() {
++        merged.merge(await(pending.removeFirst()));
++    }
++
++    private PartialAggregation await(Future<PartialAggregation> future) {
++        try {
++            return future.get();
++        } catch (InterruptedException exception) {
++            Thread.currentThread().interrupt();
++            throw new IllegalStateException("Interrupted while waiting for aggregate batch", exception);
++        } catch (ExecutionException exception) {
++            Throwable cause = exception.getCause();
++            if (cause instanceof RuntimeException runtimeException) {
++                throw runtimeException;
++            }
++            if (cause instanceof Error error) {
++                throw error;
++            }
++            throw new IllegalStateException("Aggregate batch failed", cause);
++        }
++    }
++
++    private void closeChild() {
++        if (!childClosed) {
++            childClosed = true;
++            child.close();
++        }
++    }
++
++    private void shutdownOwnedExecutor() {
++        if (ownsExecutor) {
++            executor.shutdown();
++        }
++    }
++
++    private static ExecutorService createOwnedExecutor(
++            Operator child,
++            List<String> groupByColumns,
++            List<AggregateSpecification> specifications,
++            int batchSize,
++            int maxInFlightBatches) {
++        Objects.requireNonNull(child, "child operator must not be null");
++        List<String> groups = List.copyOf(
++                Objects.requireNonNull(groupByColumns, "Group-by columns must not be null"));
++        List<AggregateSpecification> specs = List.copyOf(
++                Objects.requireNonNull(specifications, "Aggregate specifications must not be null"));
++        GroupAccumulator.validateConfiguration(groups, specs);
++        if (batchSize <= 0) {
++            throw new IllegalArgumentException("Batch size must be greater than zero");
++        }
++        if (maxInFlightBatches <= 0) {
++            throw new IllegalArgumentException("Maximum in-flight batches must be greater than zero");
++        }
++        return Executors.newFixedThreadPool(maxInFlightBatches);
++    }
++
++    private void closeAfterFailure(Throwable failure) {
++        try {
++            close();
++        } catch (RuntimeException | Error closeFailure) {
++            failure.addSuppressed(closeFailure);
++        }
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/PartialAggregation.java b/src/main/java/io/github/payal1762005/minisql/operators/PartialAggregation.java
+new file mode 100644
+index 0000000..db8afcc
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/PartialAggregation.java
+@@ -0,0 +1,88 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++
++/**
++ * A local insertion-ordered collection of group accumulators for a set of rows.
++ */
++final class PartialAggregation {
++    private final List<String> groupByColumns;
++    private final List<AggregateSpecification> specifications;
++    private final LinkedHashMap<List<String>, GroupAccumulator> groups = new LinkedHashMap<>();
++
++    PartialAggregation(
++            List<String> groupByColumns,
++            List<AggregateSpecification> specifications) {
++        this.groupByColumns = immutableCopy(groupByColumns, "Group-by columns must not be null");
++        this.specifications = immutableCopy(specifications,
++                "Aggregate specifications must not be null");
++        validateConfiguration();
++        if (this.groupByColumns.isEmpty()) {
++            groups.put(List.of(), new GroupAccumulator(
++                    this.groupByColumns, List.of(), this.specifications));
++        }
++    }
++
++    PartialAggregation(
++            Collection<Row> rows,
++            List<String> groupByColumns,
++            List<AggregateSpecification> specifications) {
++        this(groupByColumns, specifications);
++        Objects.requireNonNull(rows, "Input rows must not be null");
++        rows.forEach(this::add);
++    }
++
++    void add(Row row) {
++        Objects.requireNonNull(row, "Input row must not be null");
++        List<String> keyValues = new ArrayList<>(groupByColumns.size());
++        for (String column : groupByColumns) {
++            if (!row.values().containsKey(column)) {
++                throw new IllegalArgumentException(
++                        "Group-by column '" + column + "' is missing from row");
++            }
++            keyValues.add(row.values().get(column));
++        }
++        List<String> key = Collections.unmodifiableList(keyValues);
++        GroupAccumulator group = groups.computeIfAbsent(key,
++                ignored -> new GroupAccumulator(groupByColumns, key, specifications));
++        group.add(row);
++    }
++
++    void merge(PartialAggregation other) {
++        Objects.requireNonNull(other, "Partial aggregation must not be null");
++        if (!groupByColumns.equals(other.groupByColumns)
++                || !specifications.equals(other.specifications)) {
++            throw new IllegalArgumentException(
++                    "Cannot merge partial aggregations with incompatible specifications");
++        }
++        for (Map.Entry<List<String>, GroupAccumulator> entry : other.groups.entrySet()) {
++            GroupAccumulator current = groups.get(entry.getKey());
++            if (current == null) {
++                groups.put(entry.getKey(), entry.getValue().copy());
++            } else {
++                current.merge(entry.getValue());
++            }
++        }
++    }
++
++    List<Row> resultRows() {
++        return groups.values().stream().map(GroupAccumulator::result).toList();
++    }
++
++    private void validateConfiguration() {
++        GroupAccumulator.validateConfiguration(groupByColumns, specifications);
++    }
++
++    private static <T> List<T> immutableCopy(List<T> values, String nullMessage) {
++        Objects.requireNonNull(values, nullMessage);
++        return List.copyOf(values);
++    }
++}
+diff --git a/src/main/java/io/github/payal1762005/minisql/operators/SumAggregateState.java b/src/main/java/io/github/payal1762005/minisql/operators/SumAggregateState.java
+new file mode 100644
+index 0000000..a901bb5
+--- /dev/null
++++ b/src/main/java/io/github/payal1762005/minisql/operators/SumAggregateState.java
+@@ -0,0 +1,26 @@
++package io.github.payal1762005.minisql.operators;
++
++import java.math.BigDecimal;
++
++final class SumAggregateState extends AbstractNumericAggregateState {
++    private BigDecimal total = BigDecimal.ZERO;
++
++    SumAggregateState(String column) {
++        super(column);
++    }
++
++    @Override
++    protected void addValue(BigDecimal value) {
++        total = total.add(value);
++    }
++
++    @Override
++    protected void mergeValues(AbstractNumericAggregateState other) {
++        total = total.add(((SumAggregateState) other).total);
++    }
++
++    @Override
++    public String result() {
++        return isEmpty() ? null : total.stripTrailingZeros().toPlainString();
++    }
++}
+diff --git a/src/test/java/io/github/payal1762005/minisql/operators/AggregateStateTest.java b/src/test/java/io/github/payal1762005/minisql/operators/AggregateStateTest.java
+new file mode 100644
+index 0000000..5e401a6
+--- /dev/null
++++ b/src/test/java/io/github/payal1762005/minisql/operators/AggregateStateTest.java
+@@ -0,0 +1,170 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++import org.junit.jupiter.api.Test;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class AggregateStateTest {
++    @Test
++    void countStarCountsEveryRowAcrossMergedStatesAndHandlesEmptyInput() {
++        AggregateState left = state(AggregateFunction.COUNT, "*");
++        AggregateState right = state(AggregateFunction.COUNT, "*");
++
++        assertEquals("0", left.result());
++        left.add(rowWithNull("amount"));
++        right.add(row("amount", "not-a-number"));
++        left.merge(right);
++
++        assertEquals("2", left.result());
++        assertEquals("0", state(AggregateFunction.COUNT, "*").result());
++    }
++
++    @Test
++    void countColumnCountsOnlyNonNullValuesAcrossMergedStates() {
++        AggregateState left = state(AggregateFunction.COUNT, "amount");
++        AggregateState right = state(AggregateFunction.COUNT, "amount");
++
++        left.add(rowWithNull("amount"));
++        left.add(row("amount", "1"));
++        right.add(row("amount", "2"));
++        left.merge(right);
++
++        assertEquals("2", left.result());
++        assertEquals("0", state(AggregateFunction.COUNT, "amount").result());
++    }
++
++    @Test
++    void countColumnRejectsMissingColumnButCountStarDoesNotInspectColumns() {
++        assertThrows(IllegalArgumentException.class,
++                () -> state(AggregateFunction.COUNT, "amount").add(row("other", "1")));
++
++        AggregateState countAll = state(AggregateFunction.COUNT, "*");
++        countAll.add(row("other", "1"));
++        assertEquals("1", countAll.result());
++    }
++
++    @Test
++    void sumMergesExactDecimalTotalsAndReturnsNullForEmptyOrAllNullValues() {
++        AggregateState left = state(AggregateFunction.SUM, "amount");
++        AggregateState right = state(AggregateFunction.SUM, "amount");
++        left.add(row("amount", "0.10"));
++        right.add(row("amount", "0.20"));
++        left.merge(right);
++
++        assertEquals("0.3", left.result());
++
++        AggregateState empty = state(AggregateFunction.SUM, "amount");
++        AggregateState nullOnly = state(AggregateFunction.SUM, "amount");
++        nullOnly.add(rowWithNull("amount"));
++        empty.merge(nullOnly);
++        assertNull(empty.result());
++    }
++
++    @Test
++    void averageMergesTotalsAndCountsThenRoundsOnceAtTheExistingScale() {
++        AggregateState left = state(AggregateFunction.AVG, "amount");
++        AggregateState right = state(AggregateFunction.AVG, "amount");
++        left.add(row("amount", "1"));
++        left.add(row("amount", "2"));
++        right.add(row("amount", "2"));
++        left.merge(right);
++
++        assertEquals("1.6667", left.result());
++
++        AggregateState halfUpLeft = state(AggregateFunction.AVG, "amount");
++        AggregateState halfUpRight = state(AggregateFunction.AVG, "amount");
++        halfUpLeft.add(row("amount", "0"));
++        halfUpRight.add(row("amount", "2.4689"));
++        halfUpLeft.merge(halfUpRight);
++        assertEquals("1.2345", halfUpLeft.result());
++    }
++
++    @Test
++    void averageReturnsNullForEmptyAndAllNullValues() {
++        AggregateState empty = state(AggregateFunction.AVG, "amount");
++        AggregateState nullOnly = state(AggregateFunction.AVG, "amount");
++        nullOnly.add(rowWithNull("amount"));
++        empty.merge(nullOnly);
++
++        assertNull(empty.result());
++    }
++
++    @Test
++    void minimumAndMaximumMergeNumericExtremaAndIgnoreNulls() {
++        AggregateState minimumLeft = state(AggregateFunction.MIN, "amount");
++        AggregateState minimumRight = state(AggregateFunction.MIN, "amount");
++        AggregateState maximumLeft = state(AggregateFunction.MAX, "amount");
++        AggregateState maximumRight = state(AggregateFunction.MAX, "amount");
++
++        minimumLeft.add(rowWithNull("amount"));
++        minimumRight.add(row("amount", "100"));
++        minimumRight.add(row("amount", "20"));
++        maximumLeft.add(row("amount", "4"));
++        maximumRight.add(row("amount", "20"));
++        minimumLeft.merge(minimumRight);
++        maximumLeft.merge(maximumRight);
++
++        assertEquals("20", minimumLeft.result());
++        assertEquals("20", maximumLeft.result());
++    }
++
++    @Test
++    void minimumAndMaximumReturnNullForEmptyAndAllNullValues() {
++        for (AggregateFunction function : new AggregateFunction[]{
++                AggregateFunction.MIN, AggregateFunction.MAX}) {
++            AggregateState empty = state(function, "amount");
++            AggregateState nullOnly = state(function, "amount");
++            nullOnly.add(rowWithNull("amount"));
++            empty.merge(nullOnly);
++
++            assertNull(empty.result());
++        }
++    }
++
++    @Test
++    void allNumericStatesRejectInvalidValuesWithExistingMessageAndCause() {
++        for (AggregateFunction function : new AggregateFunction[]{
++                AggregateFunction.SUM, AggregateFunction.AVG,
++                AggregateFunction.MIN, AggregateFunction.MAX}) {
++            IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
++                    () -> state(function, "amount").add(row("amount", "bad-decimal")));
++
++            assertTrue(exception.getMessage().contains("bad-decimal"));
++            assertTrue(exception.getMessage().contains("amount"));
++            assertTrue(exception.getCause() instanceof NumberFormatException);
++        }
++    }
++
++    @Test
++    void statesRejectMergingDifferentFunctionsOrColumns() {
++        AggregateState sum = state(AggregateFunction.SUM, "amount");
++        AggregateState average = state(AggregateFunction.AVG, "amount");
++        AggregateState otherColumn = state(AggregateFunction.SUM, "other");
++
++        assertThrows(IllegalArgumentException.class, () -> sum.merge(average));
++        assertThrows(IllegalArgumentException.class, () -> sum.merge(otherColumn));
++        assertThrows(IllegalArgumentException.class, () -> sum.merge(null));
++    }
++
++    private AggregateState state(AggregateFunction function, String inputColumn) {
++        return AggregateStateFactory.create(
++                new AggregateSpecification(function, inputColumn, "result"));
++    }
++
++    private Row row(String column, String value) {
++        return new Row(Map.of(column, value));
++    }
++
++    private Row rowWithNull(String column) {
++        Map<String, String> values = new LinkedHashMap<>();
++        values.put(column, null);
++        return new Row(values);
++    }
++}
+diff --git a/src/test/java/io/github/payal1762005/minisql/operators/GroupAccumulatorTest.java b/src/test/java/io/github/payal1762005/minisql/operators/GroupAccumulatorTest.java
+new file mode 100644
+index 0000000..9767cce
+--- /dev/null
++++ b/src/test/java/io/github/payal1762005/minisql/operators/GroupAccumulatorTest.java
+@@ -0,0 +1,113 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++import org.junit.jupiter.api.Test;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++class GroupAccumulatorTest {
++    @Test
++    void accumulatesRepeatedRowsForMultipleGroupingColumnsAndAllFunctions() {
++        List<AggregateSpecification> specifications = List.of(
++                AggregateSpecification.countAll("rows"),
++                spec(AggregateFunction.COUNT, "amount", "non_null"),
++                spec(AggregateFunction.SUM, "amount", "total"),
++                spec(AggregateFunction.AVG, "amount", "average"),
++                spec(AggregateFunction.MIN, "amount", "minimum"),
++                spec(AggregateFunction.MAX, "amount", "maximum"));
++        GroupAccumulator group = new GroupAccumulator(
++                List.of("department", "region"), List.of("OrbitOps", "East"), specifications);
++
++        group.add(row("department", "OrbitOps", "region", "East", "amount", "0.10"));
++        group.add(row("department", "OrbitOps", "region", "East", "amount", "0.20"));
++
++        assertEquals(new Row(Map.of(
++                "department", "OrbitOps",
++                "region", "East",
++                "rows", "2",
++                "non_null", "2",
++                "total", "0.3",
++                "average", "0.1500",
++                "minimum", "0.1",
++                "maximum", "0.2")), group.result());
++    }
++
++    @Test
++    void supportsNullGroupKeysAndReturnsAnImmutableKey() {
++        List<String> keyValues = new ArrayList<>();
++        keyValues.add(null);
++        keyValues.add("East");
++        GroupAccumulator group = new GroupAccumulator(
++                List.of("department", "region"), keyValues,
++                List.of(AggregateSpecification.countAll("count")));
++        group.add(rowWithNullableGroup(
++                "department", null, "region", "East", "amount", null));
++        keyValues.set(0, "mutated");
++
++        assertEquals(new Row(values(
++                "department", null, "region", "East", "count", "1")), group.result());
++        assertEquals(java.util.Arrays.asList(null, "East"), group.key());
++        assertThrows(UnsupportedOperationException.class, () -> group.key().set(0, "changed"));
++    }
++
++    @Test
++    void mergeCombinesOnlyCompatibleKeysAndSpecifications() {
++        List<String> groups = List.of("department");
++        List<AggregateSpecification> specs = List.of(
++                spec(AggregateFunction.SUM, "amount", "total"));
++        GroupAccumulator left = new GroupAccumulator(groups, List.of("Sales"), specs);
++        GroupAccumulator right = new GroupAccumulator(groups, List.of("Sales"), specs);
++        left.add(row("department", "Sales", "amount", "0.1"));
++        right.add(row("department", "Sales", "amount", "0.2"));
++        left.merge(right);
++
++        assertEquals("0.3", left.result().values().get("total"));
++        assertEquals("0.2", right.result().values().get("total"));
++
++        assertThrows(IllegalArgumentException.class,
++                () -> left.merge(new GroupAccumulator(groups, List.of("Engineering"), specs)));
++        assertThrows(IllegalArgumentException.class,
++                () -> left.merge(new GroupAccumulator(groups, List.of("Sales"),
++                        List.of(spec(AggregateFunction.MAX, "amount", "total")))));
++    }
++
++    @Test
++    void rejectsRowsThatDoNotMatchGroupKeyOrOmitAGroupColumn() {
++        GroupAccumulator group = new GroupAccumulator(
++                List.of("department"), List.of("Sales"),
++                List.of(AggregateSpecification.countAll("count")));
++
++        assertThrows(IllegalArgumentException.class,
++                () -> group.add(row("department", "Engineering", "amount", "1")));
++        assertThrows(IllegalArgumentException.class, () -> group.add(row("amount", "1")));
++    }
++
++    private AggregateSpecification spec(AggregateFunction function, String input, String output) {
++        return new AggregateSpecification(function, input, output);
++    }
++
++    private Row row(String... entries) {
++        return new Row(values(entries));
++    }
++
++    private Row rowWithNullableGroup(String... entries) {
++        return new Row(values(entries));
++    }
++
++    private Map<String, String> values(String... entries) {
++        if (entries.length % 2 != 0) {
++            throw new IllegalArgumentException("Expected key/value pairs");
++        }
++        Map<String, String> values = new LinkedHashMap<>();
++        for (int index = 0; index < entries.length; index += 2) {
++            values.put(entries[index], entries[index + 1]);
++        }
++        return values;
++    }
++}
+diff --git a/src/test/java/io/github/payal1762005/minisql/operators/ParallelAggregateOperatorTest.java b/src/test/java/io/github/payal1762005/minisql/operators/ParallelAggregateOperatorTest.java
+new file mode 100644
+index 0000000..7e296b8
+--- /dev/null
++++ b/src/test/java/io/github/payal1762005/minisql/operators/ParallelAggregateOperatorTest.java
+@@ -0,0 +1,415 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++import org.junit.jupiter.api.Test;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.NoSuchElementException;
++import java.util.concurrent.AbstractExecutorService;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class ParallelAggregateOperatorTest {
++    @Test
++    void mergesOverlappingGroupsAcrossBatchesIdenticallyToSequentialAggregation() {
++        List<Row> input = List.of(
++                row("department", "Sales", "amount", "0.10"),
++                row("department", "Engineering", "amount", "2"),
++                row("department", "Sales", "amount", "0.20"),
++                row("department", "Engineering", "amount", "4"));
++        List<AggregateSpecification> specs = List.of(
++                AggregateSpecification.countAll("rows"),
++                spec(AggregateFunction.COUNT, "amount", "non_null"),
++                spec(AggregateFunction.SUM, "amount", "total"),
++                spec(AggregateFunction.AVG, "amount", "average"),
++                spec(AggregateFunction.MIN, "amount", "minimum"),
++                spec(AggregateFunction.MAX, "amount", "maximum"));
++
++        assertEquals(sequential(input, List.of("department"), specs),
++                parallel(input, List.of("department"), specs, 1, 2));
++    }
++
++    @Test
++    void preservesFirstSeenGroupOrderWhenLaterBatchCompletesFirst() {
++        OutOfOrderExecutor executor = new OutOfOrderExecutor();
++        ParallelAggregateOperator operator = operator(
++                List.of(row("department", "Z", "amount", "1"),
++                        row("department", "A", "amount", "2")),
++                List.of("department"), List.of(spec(AggregateFunction.SUM, "amount", "total")),
++                1, 2, executor);
++
++        assertEquals(List.of(
++                        row("department", "Z", "total", "1"),
++                        row("department", "A", "total", "2")),
++                consume(operator));
++        executor.shutdownNow();
++    }
++
++    @Test
++    void handlesEmptyGlobalAndGroupedInputs() {
++        List<AggregateSpecification> specs = List.of(
++                AggregateSpecification.countAll("count"),
++                spec(AggregateFunction.SUM, "amount", "total"));
++
++        assertEquals(List.of(row("count", "0", "total", null)),
++                parallel(List.of(), List.of(), specs, 3, 2));
++        assertEquals(List.of(),
++                parallel(List.of(), List.of("department"), specs, 3, 2));
++    }
++
++    @Test
++    void preservesNullGroupingAndAggregateValuesAcrossBatches() {
++        List<Row> input = List.of(
++                rowWithNullableValues("department", null, "amount", null),
++                row("department", "Sales", "amount", "1"),
++                rowWithNullableValues("department", null, "amount", "3"));
++        List<AggregateSpecification> specs = List.of(
++                AggregateSpecification.countAll("rows"),
++                spec(AggregateFunction.COUNT, "amount", "non_null"),
++                spec(AggregateFunction.AVG, "amount", "average"));
++
++        assertEquals(List.of(
++                        rowWithNullableValues("department", null,
++                                "rows", "2", "non_null", "1", "average", "3.0000"),
++                        row("department", "Sales", "rows", "1", "non_null", "1",
++                                "average", "1.0000")),
++                parallel(input, List.of("department"), specs, 1, 2));
++    }
++
++    @Test
++    void mergesDecimalSumAndAverageExactlyAcrossBatchBoundaries() {
++        List<Row> input = List.of(
++                row("amount", "0.10"),
++                row("amount", "0.20"),
++                row("amount", "2.4689"));
++        List<Row> results = parallel(input, List.of(), List.of(
++                spec(AggregateFunction.SUM, "amount", "sum"),
++                spec(AggregateFunction.AVG, "amount", "average")), 1, 2);
++
++        assertEquals(List.of(row("sum", "2.7689", "average", "0.9230")), results);
++    }
++
++    @Test
++    void supportsMoreBatchesThanTheInFlightLimit() {
++        TrackingExecutor executor = new TrackingExecutor(2);
++        List<Row> input = new ArrayList<>();
++        for (int index = 0; index < 30; index++) {
++            input.add(row("department", "D" + (index % 3), "amount", "1"));
++        }
++        ParallelAggregateOperator operator = operator(input, List.of("department"),
++                List.of(AggregateSpecification.countAll("count")), 1, 2, executor);
++
++        List<Row> result = consume(operator);
++
++        assertEquals(3, result.size());
++        assertTrue(executor.maximumOutstanding() <= 2);
++        executor.shutdownNow();
++    }
++
++    @Test
++    void childIsAccessedOnlyByTheCallingThreadAndClosedOnce() {
++        Thread callingThread = Thread.currentThread();
++        ThreadCheckingOperator child = new ThreadCheckingOperator(
++                List.of(row("amount", "1"), row("amount", "2")));
++        ParallelAggregateOperator operator = new ParallelAggregateOperator(
++                child, List.of(), List.of(spec(AggregateFunction.SUM, "amount", "total")),
++                1, 2);
++
++        assertEquals(List.of(row("total", "3")), consume(operator));
++        assertEquals(callingThread, child.accessThread);
++        assertEquals(1, child.closeCount.get());
++    }
++
++    @Test
++    void propagatesWorkerFailuresAndClosesChild() {
++        TrackingOperator child = new TrackingOperator(List.of(row("amount", "bad")));
++        ParallelAggregateOperator operator = new ParallelAggregateOperator(
++                child, List.of(), List.of(spec(AggregateFunction.SUM, "amount", "total")),
++                1, 2);
++
++        IllegalArgumentException exception =
++                assertThrows(IllegalArgumentException.class, operator::hasNext);
++
++        assertTrue(exception.getMessage().contains("bad"));
++        assertEquals(1, child.closeCount.get());
++    }
++
++    @Test
++    void respectsOwnedAndExternallySuppliedExecutorLifecycle() {
++        TrackingExecutor owned = new TrackingExecutor(1);
++        TrackingOperator ownedChild = new TrackingOperator(List.of());
++        ParallelAggregateOperator ownedOperator = new ParallelAggregateOperator(
++                ownedChild, List.of(), List.of(AggregateSpecification.countAll("count")),
++                2, 1, owned, true);
++        ownedOperator.close();
++        assertTrue(owned.isShutdown());
++        assertEquals(1, ownedChild.closeCount.get());
++
++        TrackingExecutor ownedAfterExecution = new TrackingExecutor(1);
++        ParallelAggregateOperator completedOwnedOperator = new ParallelAggregateOperator(
++                new TrackingOperator(List.of(row("amount", "1"))), List.of(),
++                List.of(AggregateSpecification.countAll("count")), 2, 1,
++                ownedAfterExecution, true);
++        assertEquals(List.of(row("count", "1")), consume(completedOwnedOperator));
++        assertTrue(ownedAfterExecution.isShutdown());
++
++        TrackingExecutor external = new TrackingExecutor(1);
++        TrackingOperator externalChild = new TrackingOperator(List.of());
++        ParallelAggregateOperator externalOperator = new ParallelAggregateOperator(
++                externalChild, List.of(), List.of(AggregateSpecification.countAll("count")),
++                2, 1, external);
++        assertEquals(List.of(row("count", "0")), consume(externalOperator));
++        assertFalse(external.isShutdown());
++        assertEquals(1, externalChild.closeCount.get());
++        external.shutdownNow();
++    }
++
++    @Test
++    void nextAfterExhaustionThrowsNoSuchElementExceptionAndCloseIsIdempotent() {
++        ParallelAggregateOperator operator = operator(List.of(), List.of("department"),
++                List.of(AggregateSpecification.countAll("count")), 2, 1, null);
++
++        assertFalse(operator.hasNext());
++        assertThrows(NoSuchElementException.class, operator::next);
++        operator.close();
++        operator.close();
++    }
++
++    private List<Row> parallel(
++            List<Row> input,
++            List<String> groups,
++            List<AggregateSpecification> specifications,
++            int batchSize,
++            int maxInFlight) {
++        return consume(operator(input, groups, specifications, batchSize, maxInFlight, null));
++    }
++
++    private ParallelAggregateOperator operator(
++            List<Row> input,
++            List<String> groups,
++            List<AggregateSpecification> specifications,
++            int batchSize,
++            int maxInFlight,
++            ExecutorService executor) {
++        TrackingOperator child = new TrackingOperator(input);
++        return executor == null
++                ? new ParallelAggregateOperator(child, groups, specifications, batchSize, maxInFlight)
++                : new ParallelAggregateOperator(child, groups, specifications,
++                batchSize, maxInFlight, executor);
++    }
++
++    private List<Row> sequential(
++            List<Row> input, List<String> groups, List<AggregateSpecification> specifications) {
++        return consume(new AggregateOperator(new TrackingOperator(input), groups, specifications));
++    }
++
++    private List<Row> consume(Operator operator) {
++        List<Row> rows = new ArrayList<>();
++        try (operator) {
++            while (operator.hasNext()) {
++                rows.add(operator.next());
++            }
++        }
++        return rows;
++    }
++
++    private AggregateSpecification spec(AggregateFunction function, String input, String output) {
++        return new AggregateSpecification(function, input, output);
++    }
++
++    private Row row(String key, String value) {
++        Map<String, String> values = new LinkedHashMap<>();
++        values.put(key, value);
++        return new Row(values);
++    }
++
++    private Row row(String key1, String value1, String key2, String value2) {
++        Map<String, String> values = new LinkedHashMap<>();
++        values.put(key1, value1);
++        values.put(key2, value2);
++        return new Row(values);
++    }
++
++    private Row row(String key1, String value1, String key2, String value2,
++                    String key3, String value3) {
++        Map<String, String> values = new LinkedHashMap<>();
++        values.put(key1, value1);
++        values.put(key2, value2);
++        values.put(key3, value3);
++        return new Row(values);
++    }
++
++    private Row row(String key1, String value1, String key2, String value2,
++                    String key3, String value3, String key4, String value4) {
++        Map<String, String> values = new LinkedHashMap<>();
++        values.put(key1, value1);
++        values.put(key2, value2);
++        values.put(key3, value3);
++        values.put(key4, value4);
++        return new Row(values);
++    }
++
++    private Row rowWithNullableValues(String... entries) {
++        Map<String, String> values = new LinkedHashMap<>();
++        for (int index = 0; index < entries.length; index += 2) {
++            values.put(entries[index], entries[index + 1]);
++        }
++        return new Row(values);
++    }
++
++    private static class TrackingOperator implements Operator {
++        private final List<Row> rows;
++        final AtomicInteger closeCount = new AtomicInteger();
++        private int index;
++
++        private TrackingOperator(List<Row> rows) {
++            this.rows = rows;
++        }
++
++        @Override
++        public boolean hasNext() {
++            return index < rows.size();
++        }
++
++        @Override
++        public Row next() {
++            if (!hasNext()) {
++                throw new NoSuchElementException();
++            }
++            return rows.get(index++);
++        }
++
++        @Override
++        public void close() {
++            closeCount.incrementAndGet();
++        }
++    }
++
++    private static final class ThreadCheckingOperator extends TrackingOperator {
++        private Thread accessThread;
++
++        private ThreadCheckingOperator(List<Row> rows) {
++            super(rows);
++        }
++
++        @Override
++        public boolean hasNext() {
++            assertCallerThread();
++            return super.hasNext();
++        }
++
++        @Override
++        public Row next() {
++            assertCallerThread();
++            return super.next();
++        }
++
++        @Override
++        public void close() {
++            assertCallerThread();
++            super.close();
++        }
++
++        private void assertCallerThread() {
++            if (accessThread == null) {
++                accessThread = Thread.currentThread();
++            }
++            if (accessThread != Thread.currentThread()) {
++                throw new AssertionError("Child operator accessed from a worker thread");
++            }
++        }
++    }
++
++    private static class TrackingExecutor extends AbstractExecutorService {
++        private final ExecutorService delegate;
++        private final AtomicInteger outstanding = new AtomicInteger();
++        private final AtomicInteger maximumOutstanding = new AtomicInteger();
++
++        private TrackingExecutor(int threads) {
++            delegate = Executors.newFixedThreadPool(threads);
++        }
++
++        @Override
++        public void execute(Runnable command) {
++            int active = outstanding.incrementAndGet();
++            maximumOutstanding.accumulateAndGet(active, Math::max);
++            delegate.execute(() -> {
++                try {
++                    command.run();
++                } finally {
++                    outstanding.decrementAndGet();
++                }
++            });
++        }
++
++        @Override
++        public void shutdown() {
++            delegate.shutdown();
++        }
++
++        @Override
++        public List<Runnable> shutdownNow() {
++            return delegate.shutdownNow();
++        }
++
++        @Override
++        public boolean isShutdown() {
++            return delegate.isShutdown();
++        }
++
++        @Override
++        public boolean isTerminated() {
++            return delegate.isTerminated();
++        }
++
++        @Override
++        public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
++            return delegate.awaitTermination(timeout, unit);
++        }
++
++        private int maximumOutstanding() {
++            return maximumOutstanding.get();
++        }
++    }
++
++    private static final class OutOfOrderExecutor extends TrackingExecutor {
++        private final AtomicInteger taskNumber = new AtomicInteger();
++        private final CountDownLatch secondCompleted = new CountDownLatch(1);
++
++        private OutOfOrderExecutor() {
++            super(2);
++        }
++
++        @Override
++        public void execute(Runnable command) {
++            int task = taskNumber.incrementAndGet();
++            super.execute(() -> {
++                if (task == 1) {
++                    try {
++                        if (!secondCompleted.await(5, TimeUnit.SECONDS)) {
++                            throw new IllegalStateException("Second batch did not complete");
++                        }
++                    } catch (InterruptedException exception) {
++                        Thread.currentThread().interrupt();
++                        throw new IllegalStateException(exception);
++                    }
++                    command.run();
++                } else {
++                    command.run();
++                    secondCompleted.countDown();
++                }
++            });
++        }
++    }
++}
+diff --git a/src/test/java/io/github/payal1762005/minisql/operators/PartialAggregationTest.java b/src/test/java/io/github/payal1762005/minisql/operators/PartialAggregationTest.java
+new file mode 100644
+index 0000000..b139d9e
+--- /dev/null
++++ b/src/test/java/io/github/payal1762005/minisql/operators/PartialAggregationTest.java
+@@ -0,0 +1,185 @@
++package io.github.payal1762005.minisql.operators;
++
++import io.github.payal1762005.minisql.model.Row;
++import org.junit.jupiter.api.Test;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++class PartialAggregationTest {
++    @Test
++    void aggregatesRepeatedAndMultipleColumnGroupsInFirstSeenOrder() {
++        PartialAggregation partial = partial(List.of(
++                        row("department", "Sales", "region", "East", "amount", "1"),
++                        row("department", "Sales", "region", "West", "amount", "2"),
++                        row("department", "Sales", "region", "East", "amount", "3")),
++                List.of("department", "region"),
++                List.of(spec(AggregateFunction.SUM, "amount", "total")));
++
++        assertEquals(List.of(
++                        row("department", "Sales", "region", "East", "total", "4"),
++                        row("department", "Sales", "region", "West", "total", "2")),
++                partial.resultRows());
++    }
++
++    @Test
++    void groupsRowsWithNullKeysAndSupportsAggregateFunctionSet() {
++        PartialAggregation partial = partial(List.of(
++                        rowWithNullDepartment("amount", "0.10"),
++                        rowWithNullDepartment("amount", "0.20")),
++                List.of("department"),
++                List.of(
++                        AggregateSpecification.countAll("rows"),
++                        spec(AggregateFunction.COUNT, "amount", "non_null"),
++                        spec(AggregateFunction.SUM, "amount", "total"),
++                        spec(AggregateFunction.AVG, "amount", "average"),
++                        spec(AggregateFunction.MIN, "amount", "minimum"),
++                        spec(AggregateFunction.MAX, "amount", "maximum")));
++
++        assertEquals(List.of(new Row(nullableValues(
++                "department", null, "rows", "2", "non_null", "2",
++                "total", "0.3", "average", "0.1500", "minimum", "0.1", "maximum", "0.2"))),
++                partial.resultRows());
++    }
++
++    @Test
++    void globalAggregationCreatesAResultForEmptyInput() {
++        PartialAggregation partial = partial(List.of(), List.of(), List.of(
++                AggregateSpecification.countAll("rows"),
++                spec(AggregateFunction.COUNT, "amount", "non_null"),
++                spec(AggregateFunction.SUM, "amount", "total"),
++                spec(AggregateFunction.AVG, "amount", "average"),
++                spec(AggregateFunction.MIN, "amount", "minimum"),
++                spec(AggregateFunction.MAX, "amount", "maximum")));
++
++        Row result = partial.resultRows().get(0);
++        assertEquals("0", result.values().get("rows"));
++        assertEquals("0", result.values().get("non_null"));
++        assertNull(result.values().get("total"));
++        assertNull(result.values().get("average"));
++        assertNull(result.values().get("minimum"));
++        assertNull(result.values().get("maximum"));
++    }
++
++    @Test
++    void emptyGroupedAggregationProducesNoGroups() {
++        PartialAggregation partial = partial(List.of(), List.of("department"),
++                List.of(AggregateSpecification.countAll("rows")));
++
++        assertEquals(List.of(), partial.resultRows());
++    }
++
++    @Test
++    void mergingPartialsCombinesOverlapsAndAppendsNewGroupsInSourceOrder() {
++        List<String> groups = List.of("department");
++        List<AggregateSpecification> specs = List.of(
++                AggregateSpecification.countAll("rows"),
++                spec(AggregateFunction.SUM, "amount", "total"));
++        PartialAggregation destination = partial(List.of(
++                row("department", "Sales", "amount", "0.1"),
++                row("department", "Engineering", "amount", "2")),
++                groups, specs);
++        PartialAggregation source = partial(List.of(
++                row("department", "Engineering", "amount", "3"),
++                row("department", "Sales", "amount", "0.2"),
++                row("department", "Support", "amount", "4")),
++                groups, specs);
++
++        destination.merge(source);
++
++        assertEquals(List.of(
++                        row("department", "Sales", "rows", "2", "total", "0.3"),
++                        row("department", "Engineering", "rows", "2", "total", "5"),
++                        row("department", "Support", "rows", "1", "total", "4")),
++                destination.resultRows());
++        assertEquals(List.of(
++                        row("department", "Engineering", "rows", "1", "total", "3"),
++                        row("department", "Sales", "rows", "1", "total", "0.2"),
++                        row("department", "Support", "rows", "1", "total", "4")),
++                source.resultRows());
++    }
++
++    @Test
++    void mergingGlobalPartialsRetainsOneGroupAndRoundsAverageAfterMerge() {
++        List<AggregateSpecification> specs = List.of(
++                AggregateSpecification.countAll("rows"),
++                spec(AggregateFunction.AVG, "amount", "average"));
++        PartialAggregation left = partial(List.of(
++                row("amount", "0"), row("amount", "2")), List.of(), specs);
++        PartialAggregation right = partial(List.of(row("amount", "2.4689")), List.of(), specs);
++
++        left.merge(right);
++
++        assertEquals(List.of(row("rows", "3", "average", "1.4896")), left.resultRows());
++        assertEquals(List.of(row("rows", "1", "average", "2.4689")), right.resultRows());
++    }
++
++    @Test
++    void rejectsIncompatibleGroupColumnsAndAggregateSpecifications() {
++        PartialAggregation base = partial(List.of(), List.of("department"),
++                List.of(spec(AggregateFunction.SUM, "amount", "total")));
++        PartialAggregation differentGroups = partial(List.of(), List.of("region"),
++                List.of(spec(AggregateFunction.SUM, "amount", "total")));
++        PartialAggregation differentSpecs = partial(List.of(), List.of("department"),
++                List.of(spec(AggregateFunction.MAX, "amount", "total")));
++
++        assertThrows(IllegalArgumentException.class, () -> base.merge(differentGroups));
++        assertThrows(IllegalArgumentException.class, () -> base.merge(differentSpecs));
++    }
++
++    @Test
++    void constructorCopiesInputCollectionAndConfiguration() {
++        List<String> groupColumns = new ArrayList<>(List.of("department"));
++        List<AggregateSpecification> specs = new ArrayList<>(
++                List.of(AggregateSpecification.countAll("rows")));
++        List<Row> rows = new ArrayList<>(
++                List.of(row("department", "Sales", "amount", "1")));
++        PartialAggregation partial = new PartialAggregation(rows, groupColumns, specs);
++        rows.clear();
++        groupColumns.clear();
++        specs.clear();
++
++        assertEquals(List.of(row("department", "Sales", "rows", "1")), partial.resultRows());
++    }
++
++    private PartialAggregation partial(
++            List<Row> rows, List<String> groupColumns, List<AggregateSpecification> specs) {
++        return new PartialAggregation(rows, groupColumns, specs);
++    }
++
++    private AggregateSpecification spec(AggregateFunction function, String input, String output) {
++        return new AggregateSpecification(function, input, output);
++    }
++
++    private Row row(String... entries) {
++        if (entries.length % 2 != 0) {
++            throw new IllegalArgumentException("Expected key/value pairs");
++        }
++        Map<String, String> values = new LinkedHashMap<>();
++        for (int index = 0; index < entries.length; index += 2) {
++            values.put(entries[index], entries[index + 1]);
++        }
++        return new Row(values);
++    }
++
++    private Row rowWithNullDepartment(String key, String value) {
++        return new Row(nullableValues("department", null, key, value));
++    }
++
++    private Map<String, String> nullableValues(String... entries) {
++        if (entries.length % 2 != 0) {
++            throw new IllegalArgumentException("Expected key/value pairs");
++        }
++        Map<String, String> values = new LinkedHashMap<>();
++        for (int index = 0; index < entries.length; index += 2) {
++            values.put(entries[index], entries[index + 1]);
++        }
++        return values;
++    }
++}

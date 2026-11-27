@@ -8,6 +8,7 @@ import io.github.payal1762005.minisql.model.LogicalPlanNode;
 import io.github.payal1762005.minisql.model.Row;
 import io.github.payal1762005.minisql.model.SelectQuery;
 import io.github.payal1762005.minisql.operators.Operator;
+import io.github.payal1762005.minisql.operators.AggregationExecutionConfig;
 import io.github.payal1762005.minisql.parser.SqlParser;
 import io.github.payal1762005.minisql.parser.SqlParserImpl;
 import io.github.payal1762005.minisql.planner.LogicalPlanBuilder;
@@ -26,6 +27,11 @@ public final class DefaultQueryEngine implements QueryEngine {
 
     public DefaultQueryEngine(TableStorage storage) {
         this(new SqlParserImpl(), new LogicalPlanBuilder(storage));
+    }
+
+    public DefaultQueryEngine(
+            TableStorage storage, AggregationExecutionConfig aggregationConfig) {
+        this(new SqlParserImpl(), new LogicalPlanBuilder(storage, aggregationConfig));
     }
 
     public DefaultQueryEngine(SqlParser parser, LogicalPlanBuilder planBuilder) {
