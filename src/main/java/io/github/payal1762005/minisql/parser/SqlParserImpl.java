@@ -8,6 +8,8 @@ import io.github.payal1762005.minisql.model.ComparisonExpression;
 import io.github.payal1762005.minisql.model.LiteralValue;
 import io.github.payal1762005.minisql.model.LogicalExpression;
 import io.github.payal1762005.minisql.model.LogicalOperator;
+import io.github.payal1762005.minisql.model.OrderByItem;
+import io.github.payal1762005.minisql.model.OrderDirection;
 import io.github.payal1762005.minisql.model.QueryPlan;
 import io.github.payal1762005.minisql.model.SelectItem;
 import io.github.payal1762005.minisql.model.SelectQuery;
@@ -71,7 +73,7 @@ public final class SqlParserImpl implements SqlParser {
             consume(TokenType.SELECT, "Expected SELECT at the start of the query");
             List<SelectItem> selectItems = parseSelectItems();
             consume(TokenType.FROM, "Expected FROM after the SELECT list");
-            String tableName = consume(TokenType.IDENTIFIER, "Expected a table name after FROM").value();
+            String tableName = consumeIdentifier("Expected a table name after FROM").value();
 
             Optional<WhereExpression> where = Optional.empty();
             if (match(TokenType.WHERE)) {
@@ -84,9 +86,21 @@ public final class SqlParserImpl implements SqlParser {
                 groupByColumns = parseColumnList("GROUP BY");
             }
 
+            List<OrderByItem> orderByItems = List.of();
+            if (match(TokenType.ORDER)) {
+                consume(TokenType.BY, "Expected BY after ORDER");
+                orderByItems = parseOrderByItems();
+            }
+
+            Optional<Integer> limit = Optional.empty();
+            if (match(TokenType.LIMIT)) {
+                limit = Optional.of(parseLimit());
+            }
+
             match(TokenType.SEMICOLON);
             consume(TokenType.EOF, "Unexpected token after the query");
-            return new SelectQuery(selectItems, tableName, where, groupByColumns, explain);
+            return new SelectQuery(
+                    selectItems, tableName, where, groupByColumns, explain, orderByItems, limit);
         }
 
         private List<SelectItem> parseSelectItems() throws SqlParseException {
@@ -102,7 +116,8 @@ public final class SqlParserImpl implements SqlParser {
             SelectItem item;
             if (match(TokenType.ASTERISK)) {
                 item = new AllColumns();
-            } else if (match(TokenType.IDENTIFIER)) {
+            } else if (isIdentifier(peek().type())) {
+                advance();
                 item = new ColumnReference(previous().value());
             } else {
                 AggregateFunction function = aggregateFunction(peek().type());
@@ -119,7 +134,7 @@ public final class SqlParserImpl implements SqlParser {
                     }
                     column = "*";
                 } else {
-                    column = consume(TokenType.IDENTIFIER,
+                    column = consumeIdentifier(
                             "Expected a column name as the aggregate argument").value();
                 }
                 consume(TokenType.RIGHT_PAREN, "Expected ')' after aggregate argument");
@@ -129,7 +144,7 @@ public final class SqlParserImpl implements SqlParser {
             if (!match(TokenType.AS)) {
                 return item;
             }
-            Token alias = consume(TokenType.IDENTIFIER, "Expected an identifier after AS");
+            Token alias = consumeIdentifier("Expected an identifier after AS");
             if (item instanceof ColumnReference column) {
                 return new ColumnReference(column.columnName(), alias.value());
             }
@@ -141,12 +156,60 @@ public final class SqlParserImpl implements SqlParser {
 
         private List<String> parseColumnList(String clause) throws SqlParseException {
             List<String> columns = new ArrayList<>();
-            columns.add(consume(TokenType.IDENTIFIER, "Expected a column after " + clause).value());
+            columns.add(consumeIdentifier("Expected a column after " + clause).value());
             while (match(TokenType.COMMA)) {
-                columns.add(consume(TokenType.IDENTIFIER,
-                        "Expected a column after ',' in " + clause).value());
+                columns.add(consumeIdentifier("Expected a column after ',' in " + clause).value());
             }
             return List.copyOf(columns);
+        }
+
+        private List<OrderByItem> parseOrderByItems() throws SqlParseException {
+            List<OrderByItem> items = new ArrayList<>();
+            items.add(parseOrderByItem());
+            while (match(TokenType.COMMA)) {
+                items.add(parseOrderByItem());
+            }
+            return List.copyOf(items);
+        }
+
+        private OrderByItem parseOrderByItem() throws SqlParseException {
+            Token column = consumeIdentifier("Expected a column name after ORDER BY");
+            OrderDirection direction = OrderDirection.ASC;
+            if (match(TokenType.ASC)) {
+                direction = OrderDirection.ASC;
+            } else if (match(TokenType.DESC)) {
+                direction = OrderDirection.DESC;
+            } else if (peek().type() == TokenType.IDENTIFIER) {
+                throw error(peek(), "Invalid ORDER BY direction '" + peek().value()
+                        + "'; expected ASC or DESC");
+            }
+            return new OrderByItem(column.value(), direction);
+        }
+
+        private int parseLimit() throws SqlParseException {
+            if (match(TokenType.MINUS)) {
+                Token number = peek();
+                if (match(TokenType.NUMBER)) {
+                    throw error(number, "LIMIT must be non-negative");
+                }
+                throw error(number, "Expected a non-negative integer after LIMIT");
+            }
+
+            Token token = consume(TokenType.NUMBER, "Expected a non-negative integer after LIMIT");
+            if (token.value().contains(".")) {
+                throw error(token, "LIMIT must be an integer");
+            }
+            try {
+                BigInteger value = new BigInteger(token.value());
+                if (value.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0) {
+                    throw error(token, "LIMIT exceeds the maximum supported value "
+                            + Integer.MAX_VALUE);
+                }
+                return value.intValueExact();
+            } catch (NumberFormatException | ArithmeticException exception) {
+                throw new SqlParseException("Invalid LIMIT value at line " + token.line()
+                        + ", column " + token.column(), exception);
+            }
         }
 
         private WhereExpression parseOrExpression() throws SqlParseException {
@@ -177,7 +240,7 @@ public final class SqlParserImpl implements SqlParser {
         }
 
         private ComparisonExpression parseComparison() throws SqlParseException {
-            String column = consume(TokenType.IDENTIFIER,
+            String column = consumeIdentifier(
                     "Expected a column name in WHERE condition").value();
             Token operatorToken = peek();
             ComparisonOperator operator = COMPARISON_OPERATORS.get(operatorToken.type());
@@ -218,6 +281,18 @@ public final class SqlParserImpl implements SqlParser {
                 return advance();
             }
             throw error(peek(), message);
+        }
+
+        private Token consumeIdentifier(String message) throws SqlParseException {
+            if (isIdentifier(peek().type())) {
+                return advance();
+            }
+            throw error(peek(), message);
+        }
+
+        private static boolean isIdentifier(TokenType type) {
+            return type == TokenType.IDENTIFIER || type == TokenType.ORDER
+                    || type == TokenType.ASC || type == TokenType.DESC || type == TokenType.LIMIT;
         }
 
         private boolean match(TokenType type) {

@@ -12,7 +12,9 @@ public record SelectQuery(
         String tableName,
         Optional<WhereExpression> where,
         List<String> groupByColumns,
-        boolean explain) implements QueryPlan {
+        boolean explain,
+        List<OrderByItem> orderByItems,
+        Optional<Integer> limit) implements QueryPlan {
     public SelectQuery {
         selectItems = List.copyOf(Objects.requireNonNull(selectItems, "SELECT items must not be null"));
         if (selectItems.isEmpty()) {
@@ -30,10 +32,25 @@ public record SelectQuery(
         if (groupByColumns.stream().anyMatch(column -> column == null || column.isBlank())) {
             throw new IllegalArgumentException("GROUP BY columns must not be blank");
         }
+        orderByItems = List.copyOf(
+                Objects.requireNonNull(orderByItems, "ORDER BY items must not be null"));
+        if (orderByItems.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("ORDER BY items must not contain null");
+        }
+        Objects.requireNonNull(limit, "LIMIT optional must not be null");
+        if (limit.isPresent() && limit.orElseThrow() < 0) {
+            throw new IllegalArgumentException("LIMIT must not be negative");
+        }
+    }
+
+    public SelectQuery(List<SelectItem> selectItems, String tableName,
+                       Optional<WhereExpression> where, List<String> groupByColumns,
+                       boolean explain) {
+        this(selectItems, tableName, where, groupByColumns, explain, List.of(), Optional.empty());
     }
 
     public SelectQuery(List<SelectItem> selectItems, String tableName,
                        Optional<WhereExpression> where, List<String> groupByColumns) {
-        this(selectItems, tableName, where, groupByColumns, false);
+        this(selectItems, tableName, where, groupByColumns, false, List.of(), Optional.empty());
     }
 }

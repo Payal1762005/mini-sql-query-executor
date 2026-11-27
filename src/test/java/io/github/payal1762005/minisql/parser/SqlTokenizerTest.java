@@ -38,6 +38,27 @@ class SqlTokenizerTest {
     }
 
     @Test
+    void recognizesOrderByAndLimitKeywordsCaseInsensitively() throws SqlParseException {
+        List<Token> tokens = tokenizer.tokenize("order ORDER by BY asc ASC desc DESC limit LIMIT");
+
+        assertEquals(List.of(TokenType.ORDER, TokenType.ORDER, TokenType.BY, TokenType.BY,
+                TokenType.ASC, TokenType.ASC, TokenType.DESC, TokenType.DESC,
+                TokenType.LIMIT, TokenType.LIMIT, TokenType.EOF), types(tokens));
+        assertEquals("order", tokens.get(0).value());
+        assertEquals("ORDER", tokens.get(1).value());
+        assertEquals("limit", tokens.get(8).value());
+        assertEquals("LIMIT", tokens.get(9).value());
+    }
+
+    @Test
+    void tokenizesMinusSeparatelyFromInteger() throws SqlParseException {
+        List<Token> tokens = tokenizer.tokenize("-10");
+
+        assertEquals(List.of(TokenType.MINUS, TokenType.NUMBER, TokenType.EOF), types(tokens));
+        assertEquals("10", tokens.get(1).value());
+    }
+
+    @Test
     void tracksPositionsAcrossWhitespaceAndNewlines() throws SqlParseException {
         List<Token> tokens = tokenizer.tokenize("SELECT\r\n  name\nFROM people");
 

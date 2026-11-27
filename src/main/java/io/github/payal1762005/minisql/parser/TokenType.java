@@ -11,6 +11,10 @@ public enum TokenType {
     WHERE,
     GROUP,
     BY,
+    ORDER,
+    ASC,
+    DESC,
+    LIMIT,
     AND,
     OR,
     COUNT,
@@ -32,5 +36,6 @@ public enum TokenType {
     GREATER_THAN_OR_EQUAL,
     LESS_THAN_OR_EQUAL,
     SEMICOLON,
+    MINUS,
     EOF
 }

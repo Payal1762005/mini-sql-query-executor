@@ -86,6 +86,7 @@ public final class SqlTokenizer {
             case ')' -> token(TokenType.RIGHT_PAREN, ")", ")", start, startLine, startColumn);
             case '*' -> token(TokenType.ASTERISK, "*", "*", start, startLine, startColumn);
             case ';' -> token(TokenType.SEMICOLON, ";", ";", start, startLine, startColumn);
+            case '-' -> token(TokenType.MINUS, "-", "-", start, startLine, startColumn);
             case '=' -> token(TokenType.EQUALS, "=", "=", start, startLine, startColumn);
             case '!' -> {
                 if (match('=')) {
@@ -191,7 +192,8 @@ public final class SqlTokenizer {
         Map<String, TokenType> keywords = new HashMap<>();
         for (TokenType type : List.of(
                 TokenType.SELECT, TokenType.EXPLAIN, TokenType.AS, TokenType.FROM, TokenType.WHERE, TokenType.GROUP,
-                TokenType.BY, TokenType.AND, TokenType.OR, TokenType.COUNT, TokenType.SUM,
+                TokenType.BY, TokenType.ORDER, TokenType.ASC, TokenType.DESC, TokenType.LIMIT,
+                TokenType.AND, TokenType.OR, TokenType.COUNT, TokenType.SUM,
                 TokenType.AVG, TokenType.MIN, TokenType.MAX)) {
             keywords.put(type.name(), type);
         }
