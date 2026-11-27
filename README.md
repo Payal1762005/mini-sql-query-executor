@@ -356,6 +356,29 @@ garbage-collection metrics such as normalized bytes per operation. See
 `BENCHMARKS.md` for warm-up, measurement, fork defaults, JVM considerations,
 and limitations.
 
+### Parallel grouped-aggregation results
+
+A completed JMH run of
+`SELECT department, AVG(salary) FROM employees GROUP BY department` used JDK
+21.0.10, JMH 1.37, 3 warm-up iterations, 5 measurement iterations, and 2 forks.
+The benchmark used 100,000- and 1,000,000-row deterministic CSV datasets, batch
+size 4,096, and parallel worker counts of 1, 2, 4, and 8. The effective maximum
+in-flight batch count equals the worker count. Speedup is relative to serial
+execution at the same row count; below 1.00x means slower than serial.
+
+| Configuration | 100K rows | Speedup | 1M rows | Speedup |
+|---|---:|---:|---:|---:|
+| Serial | 155.069 ms | 1.00x | 1528.134 ms | 1.00x |
+| Parallel 1 worker | 196.595 ms | 0.79x | 1992.727 ms | 0.77x |
+| Parallel 2 workers | 211.066 ms | 0.73x | 1901.954 ms | 0.80x |
+| Parallel 4 workers | 119.606 ms | 1.30x | 1153.651 ms | 1.32x |
+| Parallel 8 workers | 130.930 ms | 1.18x | 1072.998 ms | 1.42x |
+
+These are results for this measured workload and environment, not a general
+performance guarantee. Input scanning remains sequential; parallelism applies
+to aggregation batches. See [`BENCHMARKS.md`](BENCHMARKS.md) for the run command,
+setup details, and limitations.
+
 A previous short smoke run used JDK 21.0.10, 1,000 rows, 16 extra columns, 50%
 uniform selectivity, one warm-up iteration, two measurement iterations, and one
 fork, with `-Xms1g -Xmx1g` and JMH's GC profiler enabled. The exact benchmark

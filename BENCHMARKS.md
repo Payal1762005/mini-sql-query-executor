@@ -71,6 +71,67 @@ Benchmark methods execute the supported SQL end to end using
 as separate requested labels; their measurements should therefore be equivalent
 apart from normal run-to-run variance.
 
+## Serial versus parallel grouped aggregation
+
+`ParallelAggregationBenchmark` isolates the grouped-average query:
+
+```sql
+SELECT department, AVG(salary) FROM employees GROUP BY department
+```
+
+It benchmarks 100,000 and 1,000,000 deterministic synthetic employee rows.
+`aggregationMode` compares serial execution with parallel execution configured
+for 1, 2, 4, and 8 workers. The parallel configurations use a fixed batch size
+of 4,096 rows. The current `AggregationExecutionConfig` has no independent
+maximum-in-flight setting; the effective maximum in-flight batch count equals
+the configured worker count. Parallel-with-one-worker is measured separately
+from serial execution.
+
+The CSV is generated once per JMH trial, outside the timed benchmark method.
+During trial setup, the selected engine configuration executes the query and
+its result is checked against a serial reference. Validation compares group
+keys without relying on row order and compares averages numerically using
+`BigDecimal`, so representational scale differences do not count as result
+differences. The timed method measures the end-to-end query execution, including
+CSV reading, parsing, planning, aggregation, and result materialization, but
+excludes dataset creation and correctness validation. Teardown deletes the
+temporary CSV and its directory; setup failures also trigger cleanup.
+
+Run the complete matrix with the benchmark class's standard settings (3
+one-second warm-up iterations, 5 one-second measurement iterations, and 2
+forks):
+
+```powershell
+java -Xms2g -Xmx2g -jar target\mini-sql-query-executor-1.0-SNAPSHOT-benchmarks.jar `
+  '.*ParallelAggregationBenchmark.groupedAverage' `
+  -p rowCount=100000,1000000 `
+  -p aggregationMode=serial,parallel-1,parallel-2,parallel-4,parallel-8 `
+  -wi 3 -i 5 -f 2 -rf csv -rff target\parallel-aggregation-results.csv
+```
+
+### Recorded results
+
+The following results are from a completed run using JDK 21.0.10 and JMH 1.37.
+It used 3 warm-up iterations, 5 measurement iterations, and 2 forks, as in the
+command above. Times are average time per query. Speedups are relative to the
+serial result at the same dataset size; values below 1.00x indicate that the
+parallel configuration was slower.
+
+| Configuration | 100K rows | Speedup | 1M rows | Speedup |
+|---|---:|---:|---:|---:|
+| Serial | 155.069 ms | 1.00x | 1528.134 ms | 1.00x |
+| Parallel 1 worker | 196.595 ms | 0.79x | 1992.727 ms | 0.77x |
+| Parallel 2 workers | 211.066 ms | 0.73x | 1901.954 ms | 0.80x |
+| Parallel 4 workers | 119.606 ms | 1.30x | 1153.651 ms | 1.32x |
+| Parallel 8 workers | 130.930 ms | 1.18x | 1072.998 ms | 1.42x |
+
+These are measurements for this specific grouped-average query and environment,
+not a general performance guarantee. Parallel execution still reads the CSV
+sequentially; the benchmark measures parallel batch aggregation rather than
+parallel storage I/O. Results can vary with hardware, JVM flags, load, and
+filesystem/cache state, so use the command above to reproduce the matrix on the
+target system.
+
 `fullRowScan`, `narrowProjection`, `selectiveFilter`, `filterAndProjection`, and
 `groupedAverage` return output row counts to JMH. The benchmark class configures
 milliseconds as its output time unit, so throughput is reported as operations per
